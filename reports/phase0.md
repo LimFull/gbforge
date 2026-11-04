@@ -82,7 +82,20 @@ DMG 부트 ROM(로고 스크롤) 이후 실행되므로 첫 관찰은 300프레�
 
 ## 6. gb-recompiled 스파이크
 
-진행 중 — 결과는 [gb-recompiled-spike.md](gb-recompiled-spike.md)에 추가 예정.
+상세: [gb-recompiled-spike.md](gb-recompiled-spike.md) · 대상 `arcanite24/gb-recompiled@9150f87` (MIT)
+
+**판정: Conditional** — 분석기·IR(`libgbrecomp_core.a`)은 재사용, 생성 C와 PC 런타임은 GBA용으로 새로 작성.
+
+| 질문 | 결과 |
+|---|---|
+| Q1 SDL2 분리 | ✅ SDL 없이 빌드, 외부 프로그램에서 라이브러리로 DQ 분석 성공 |
+| Q2 생성 C 의존성 | `stdint/stdbool/stddef` + 런타임 심볼 ~75개, `GBContext` 필드 직접 접근 |
+| Q3 인터프리터 폴백 | strict 모드 없음. 단 폴백이 `gbrt_execute_dispatch_fallback` 한 곳으로 모여 trap 교체 가능. DQ 연타 10,800프레임에서 폴백 사이트 5곳(첫 발생 frame 1,018) |
+| Q4 메타데이터 | `metadata.json`에 함수·진단 11,550건. 뱅크 전환·교차 뱅크 호출·CFG 엣지는 라이브러리 API로 추출(50–100줄) |
+| Q5 GBA 예산 | DQ 생성 코드 Thumb `.text` **37.50 MiB** → GBA 링크 시 32 MiB를 9.07 MB 초과. 명령당 계측(`gb_tick` 60만 곳 등)이 40–60%. 런타임은 ROM 2 MiB를 `malloc` 복사 |
+| Q6 라이선스 | MIT, 재사용 가능. 상용 ROM 생성물은 ROM 전체를 포함하므로 배포·커밋 금지 |
+
+호스트 빌드·테스트: ctest 84/85 통과(실패 1건은 외부 Blargg/Mooneye ROM 부재로 인한 환경 의존 테스트).
 
 ## 7. CI
 
@@ -100,4 +113,6 @@ DMG 부트 ROM(로고 스크롤) 이후 실행되므로 첫 관찰은 300프레�
 
 ## 9. 다음 작업 (Phase 1)
 
-스파이크 판정(Go / Conditional / No-Go) 후 확정.
+1. `gb2gba analyze`: `libgbrecomp_core.a`(커밋 고정)에 링크하는 C++ 호스트 도구로 functions·blocks·엣지·뱅크 전환·교차 뱅크 호출·미해결 경로를 우리 JSON 스키마로 출력. 반복 실행 동일 출력(Gate P1).
+2. emucap `(bank, pc)` 트레이스를 entry point로 되먹여 DQ 폴백 사이트와 데이터 오인 코드를 줄인다(관측은 *코드 존재* 근거로만 쓰고, 미해결 간접 분기의 해결 근거로는 쓰지 않는다).
+3. Phase 2 PoC: IR → GBA 전용 C 생성기(블록 단위 사이클, sparse dispatch, ROM 직접 읽기, strict trap) + 최소 GBA 런타임으로 `tiny.gb`를 strict native 실행.
