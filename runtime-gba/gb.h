@@ -7,11 +7,16 @@
 
 typedef void (*GbFn)(uint16_t at);
 
+// Register pairs are little-endian unions so BC/DE/HL are single halfword loads/stores.
 typedef struct {
-    uint8_t a, b, c, d, e, h, l;
+    uint8_t a;
     uint8_t zf, nf, hf, cf;   // flags, each 0 or 1 (packed only for PUSH/POP AF)
     uint8_t ime;
     uint8_t irq;              // runtime-maintained: ime && (IE & IF & 0x1F)
+    uint8_t pad_;
+    union { struct { uint8_t c, b; }; uint16_t bc; };
+    union { struct { uint8_t e, d; }; uint16_t de; };
+    union { struct { uint8_t l, h; }; uint16_t hl; };
     uint16_t sp;
     uint16_t ret;             // address popped by the last RET/RETI
     uint16_t rom_bank;        // MBC bank mapped at 0x4000
@@ -65,7 +70,6 @@ __attribute__((noreturn)) void gb_trap(uint16_t bank, uint16_t addr, uint8_t rea
 
 enum { TRAP_UNDEFINED = 1, TRAP_NO_ENTRY = 2, TRAP_RET_MISMATCH = 3, TRAP_STOP = 4, TRAP_EXIT = 5 };
 
-// gb.irq is raised by the GBA VBlank ISR, so read it volatile (busy-wait loops must see it).
 #define GB_CALL(RET_, CALL_) do { uint16_t fs_ = gb.frame_sp; push16(RET_); gb.frame_sp = gb.sp; \
     CALL_; int dead_ = gb.jfn ? gb_trampoline() : 0; gb.frame_sp = fs_; \
     if (dead_ || gb.ret != (RET_)) return; } while (0)
@@ -133,12 +137,12 @@ static inline __attribute__((always_inline)) void push16(uint16_t v)
     gb_push16_slow(sp, v);
 }
 
-#define BC() ((uint16_t)(gb.b << 8 | gb.c))
-#define DE() ((uint16_t)(gb.d << 8 | gb.e))
-#define HL() ((uint16_t)(gb.h << 8 | gb.l))
-#define SET_BC(v) do { uint16_t t_ = (v); gb.b = t_ >> 8; gb.c = t_; } while (0)
-#define SET_DE(v) do { uint16_t t_ = (v); gb.d = t_ >> 8; gb.e = t_; } while (0)
-#define SET_HL(v) do { uint16_t t_ = (v); gb.h = t_ >> 8; gb.l = t_; } while (0)
+#define BC() (gb.bc)
+#define DE() (gb.de)
+#define HL() (gb.hl)
+#define SET_BC(v) (gb.bc = (uint16_t)(v))
+#define SET_DE(v) (gb.de = (uint16_t)(v))
+#define SET_HL(v) (gb.hl = (uint16_t)(v))
 
 static inline __attribute__((always_inline)) uint8_t pack_f(void) { return gb.zf << 7 | gb.nf << 6 | gb.hf << 5 | gb.cf << 4; }
 static inline __attribute__((always_inline)) void unpack_f(uint8_t f) { gb.zf = f >> 7 & 1; gb.nf = f >> 6 & 1; gb.hf = f >> 5 & 1; gb.cf = f >> 4 & 1; }

@@ -21,6 +21,7 @@ def main():
     p.add_argument("--frames", type=int, required=True)
     p.add_argument("--inputs", default="")
     p.add_argument("--merge", help="OR the result into this existing CDL")
+    p.add_argument("--clear-cart", type=int, help="zero this many cart RAM bytes at power-on")
     a = p.parse_args()
     mesen = os.environ.get("MESEN_BIN")
     if not mesen:
@@ -32,6 +33,8 @@ def main():
         f.write(SETTINGS)
     out = os.path.abspath(a.out)
     env = dict(os.environ, CDL_OUT=out, CDL_FRAMES=str(a.frames), CDL_INPUTS=a.inputs)
+    if a.clear_cart:
+        env["CDL_CLEAR_CART"] = str(a.clear_cart)
     subprocess.run([os.path.join(home, "Mesen"), "--testRunner", os.path.abspath(a.rom),
                     os.path.join(ROOT, "scripts", "mesen_cdl.lua")], env=env, check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

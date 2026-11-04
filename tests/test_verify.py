@@ -68,7 +68,8 @@ class VerifyTest(unittest.TestCase):
         write_png(self.path("gba.png"), self.gba)
         ok, why = same_picture(self.path("gb.png"), self.path("gba.png"))
         self.assertFalse(ok)
-        self.assertIn("(70,50)", why)
+        self.assertIn("1 px differ, first at (70, 50)", why)
+        self.assertTrue(same_picture(self.path("gb.png"), self.path("gba.png"), tolerance=1)[0])
 
 
 if __name__ == "__main__":

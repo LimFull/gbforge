@@ -60,7 +60,24 @@ def until_eq(m, spec, want, max_frames):
         m.call("clear_breakpoint", {"id": bp})
 
 
-def run(rom, scenario, outdir, translate=lambda spec: spec):
+class GbClock:
+    """Count scenario frames in GB time on a port (its GB VBlanks), so a port that lags in heavy
+    scenes still receives each input at the same game moment as the original."""
+
+    def __init__(self, m, addr):
+        self.m, self.addr = m, addr
+
+    def now(self):
+        h = self.m.call("read_memory", {"memory_type": "gbaMemory", "address": self.addr, "length": 4})["hex"]
+        return int.from_bytes(bytes.fromhex(h), "little")
+
+    def step(self, n):
+        target = self.now() + n
+        while (left := target - self.now()) > 0:
+            self.m.call("step", {"count": left})
+
+
+def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None):
     os.makedirs(outdir, exist_ok=True)
     result = {"rom": os.path.basename(rom),
               "rom_sha256": hashlib.sha256(open(rom, "rb").read()).hexdigest(),
@@ -75,11 +92,24 @@ def run(rom, scenario, outdir, translate=lambda spec: spec):
         launch_id = st["runtime_instance"]["launch_id"]
         result["system"] = args.get("system")
         result["emulator"] = f"Mesen {host.get('tag')} ({host.get('commit', '')[:10]})"
+        clock = GbClock(m, gb_frames_addr) if gb_frames_addr else None
         try:
             for s in scenario["steps"]:
-                if "step" in s:
+                if "step" in s and clock:
+                    clock.step(s["step"])
+                elif "tap" in s and clock:
+                    result.setdefault("inputs", []).append({"gb_frame": clock.now(), "buttons": s["tap"], "press": s.get("press", 2)})
+                    rev = m.call("debug", {"operation": "describe"})["capability_revision"]
+                    dbg = lambda args: m.call("debug", {"operation": "set_input", "arguments": args, "known_capability_revision": rev})
+                    dbg({"buttons": s["tap"]})
+                    clock.step(s.get("press", 2))
+                    dbg({"buttons": []})
+                    clock.step(s.get("after", 1))
+                elif "step" in s:
                     m.call("step", {"count": s["step"]})
                 elif "tap" in s:
+                    result.setdefault("inputs", []).append(
+                        {"frame": m.call("status", {})["frame"], "buttons": s["tap"], "press": s.get("press", 2)})
                     m.call("tap", {"buttons": s["tap"], "press_frames": s.get("press", 2),
                                    "after_frames": s.get("after", 1)})
                 elif "until" in s and "eq" in s:
@@ -105,6 +135,7 @@ def run(rom, scenario, outdir, translate=lambda spec: spec):
                     result["shots"][s["shot"]] = r["provenance"]["sha256"]
                 else:
                     raise SystemExit(f"unknown step: {s}")
+            result["final_frame"] = m.call("status", {})["frame"]
         finally:
             m.call("stop", {"launch_id": launch_id})
     with open(os.path.join(outdir, "result.json"), "w") as f:
@@ -119,5 +150,8 @@ if __name__ == "__main__":
         raise SystemExit("emucap-mcp not found: set EMUCAP_MCP (see local.env.example)")
     rom, scen, out = sys.argv[1:]
     map_path = os.path.splitext(rom)[0] + ".map.json"
-    tr = gb_to_gba(json.load(open(map_path))) if rom.endswith(".gba") and os.path.exists(map_path) else (lambda s: s)
-    print(json.dumps(run(os.path.abspath(rom), json.load(open(scen)), os.path.abspath(out), tr), indent=2))
+    port = rom.endswith(".gba") and os.path.exists(map_path)
+    doc = json.load(open(map_path)) if port else {}
+    tr = gb_to_gba(doc) if port else (lambda s: s)
+    clock = int(doc["memory"]["gb_frames"], 16) if port and "gb_frames" in doc["memory"] else None
+    print(json.dumps(run(os.path.abspath(rom), json.load(open(scen)), os.path.abspath(out), tr, clock), indent=2))

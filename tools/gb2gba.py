@@ -219,6 +219,7 @@ def write_map(sym_path, map_path, header):
             "trap": f"0x{syms['gb_trap_info']:08X}",
             "frames": f"0x{syms['gb_frames']:08X}",          # u32 GBA VBlanks, then u32 lag frames
             "lag_frames": f"0x{syms['gb_lag_frames']:08X}",
+            "gb_frames": f"0x{syms['gb_paced']:08X}",       # u32 GB frames elapsed in GB time
             **({"profile": {"pcs": f"0x{syms['gb_prof_pcs']:08X}", "count": f"0x{syms['gb_prof_count']:08X}", "size": 4096}}
                if "gb_prof_pcs" in syms else {}),
             # GB-visible windows. D000-DFFF matches only while SVBK selects bank 0/1 (CGB).
@@ -320,19 +321,28 @@ def read_png(path):
     return w, h, rows
 
 
-def same_picture(gb_png, gba_png):
-    """GB 160x144 vs the port's letterboxed 240x160 at (40,8), equal up to a palette bijection."""
+def same_picture(gb_png, gba_png, tolerance=0):
+    """GB 160x144 vs the port's letterboxed 240x160 at (40,8), equal up to a colour mapping
+    (the two emulators apply different LCD colour correction). Pixels disagreeing with the
+    majority mapping are counted; up to `tolerance` of them (blink phases) still pass."""
     gw, gh, g = read_png(gb_png)
     aw, ah, a = read_png(gba_png)
     if (gw, gh) != (160, 144) or (aw, ah) != (240, 160):
         return False, f"unexpected sizes {gw}x{gh} / {aw}x{ah}"
-    fwd, back = {}, {}
+    votes = {}
     for y in range(144):
         for x in range(160):
-            p, q = g[y][x], a[y + 8][x + 40]
-            if fwd.setdefault(p, q) != q or back.setdefault(q, p) != p:
-                return False, f"pixel ({x},{y}) differs"
-    return True, f"{len(fwd)} colours"
+            key = (g[y][x], a[y + 8][x + 40])
+            votes[key] = votes.get(key, 0) + 1
+    fwd, back = {}, {}
+    for (p, q), _ in sorted(votes.items(), key=lambda kv: -kv[1]):   # strongest pairs first, one-to-one
+        if p not in fwd and q not in back:
+            fwd[p], back[q] = q, p
+    bad = [(x, y) for y in range(144) for x in range(160) if fwd.get(g[y][x]) != a[y + 8][x + 40]]
+    if not bad:
+        return True, f"{len(fwd)} colours"
+    where = f"{len(bad)} px differ, first at {bad[0]}"
+    return len(bad) <= tolerance, where
 
 
 def cmd_verify(args):
@@ -341,10 +351,12 @@ def cmd_verify(args):
     with open(args.scenario) as f:
         scenario = json.load(f)
     with open(os.path.splitext(args.port)[0] + ".map.json") as f:
-        tr = emucap_run.gb_to_gba(json.load(f))
+        doc = json.load(f)
+    tr = emucap_run.gb_to_gba(doc)
+    clock = int(doc["memory"]["gb_frames"], 16) if "gb_frames" in doc["memory"] else None  # GB-time frames
     try:
         orig = emucap_run.run(os.path.abspath(args.rom), scenario, os.path.join(args.out, "original"))
-        port = emucap_run.run(os.path.abspath(args.port), scenario, os.path.join(args.out, "port"), tr)
+        port = emucap_run.run(os.path.abspath(args.port), scenario, os.path.join(args.out, "port"), tr, clock)
     except Exception as e:  # emucap/emulator failures are external-tool errors, not mismatches
         print(f"error: {e}", file=sys.stderr)
         return 6
@@ -352,9 +364,10 @@ def cmd_verify(args):
     for label, want in orig["reads"].items():
         got = port["reads"].get(label)
         checks.append({"check": f"read:{label}", "ok": got == want, "original": want, "port": got})
+    tolerance = scenario.get("shot_tolerance", 0)
     for label in orig["shots"]:
         ok, why = same_picture(os.path.join(args.out, "original", label + ".png"),
-                               os.path.join(args.out, "port", label + ".png"))
+                               os.path.join(args.out, "port", label + ".png"), tolerance)
         checks.append({"check": f"shot:{label}", "ok": ok, "detail": why})
     ok = all(c["ok"] for c in checks)
     with open(os.path.join(args.out, "verify.json"), "w") as f:

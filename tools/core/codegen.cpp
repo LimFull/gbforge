@@ -475,9 +475,9 @@ struct Gen {
         o << "void " << fn_name(fk) << "(uint16_t at)\n{\n";
         auto& extra = entries[fk];
         if (!extra.empty() || *blocks.begin() != fk) {
-            o << "    switch (at) {\n";
+            o << "    if (at != " << hex4(kaddr(fk)) << ") switch (at) {\n";  // most calls enter at the top
             for (uint32_t e : extra) o << "    case " << hex4(kaddr(e)) << ": goto " << label(kaddr(e)) << ";\n";
-            o << "    default: goto " << label(kaddr(fk)) << ";\n    }\n";
+            o << "    }\n";
         } else {
             o << "    (void)at;\n";
         }

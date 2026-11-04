@@ -14,6 +14,7 @@ for f, buttons, hold in string.gmatch(os.getenv("CDL_INPUTS") or "", "(%d+):([%a
 end
 
 local frame = 0
+local clear_cart = os.getenv("CDL_CLEAR_CART")   -- "N": write N zero bytes to cart RAM at start
 
 emu.addEventCallback(function()
   local input = {}
@@ -26,6 +27,9 @@ emu.addEventCallback(function()
 end, emu.eventType.inputPolled)
 
 emu.addEventCallback(function()
+  if frame == 0 and clear_cart then
+    for i = 0, tonumber(clear_cart) - 1 do emu.write(i, 0, emu.memType.gbCartRam) end
+  end
   frame = frame + 1
   if frame < total then return end
   local cdl = emu.getCdlData(emu.memType.gbPrgRom)

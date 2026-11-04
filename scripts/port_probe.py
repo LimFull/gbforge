@@ -50,9 +50,10 @@ def main(port, outdir, frames, taps):
                 t = rd(trap, 6)
                 io = rd(all_syms["io"], 0x80) if "io" in all_syms else b""
                 print(f"[frame {frame}] pc={sym(st['cpu.r15'])} lr={sym(st['cpu.r14'])} arm_sp={st['cpu.r13']:#x}")
-                print(f"  gb af={c[0]:02x} bc={c[1]:02x}{c[2]:02x} de={c[3]:02x}{c[4]:02x} hl={c[5]:02x}{c[6]:02x}"
-                      f" z{c[7]}n{c[8]}h{c[9]}c{c[10]} ime={c[11]} irq={c[12]} sp={c[14] | c[15] << 8:04x}"
-                      f" ret={c[16] | c[17] << 8:04x} bank={c[18] | c[19] << 8} frame_sp={c[20] | c[21] << 8:04x}")
+                w = lambda o: c[o] | c[o + 1] << 8   # layout: runtime-gba/gb.h GbCpu
+                print(f"  gb a={c[0]:02x} bc={w(8):04x} de={w(10):04x} hl={w(12):04x}"
+                      f" z{c[1]}n{c[2]}h{c[3]}c{c[4]} ime={c[5]} irq={c[6]} sp={w(14):04x}"
+                      f" ret={w(16):04x} bank={w(18)} frame_sp={w(20):04x}")
                 if io:
                     print(f"  LCDC={io[0x40]:02x} STAT={io[0x41]:02x} SCY={io[0x42]:02x} SCX={io[0x43]:02x} IF={io[0x0f]:02x} KEY1={io[0x4d]:02x} VBK={io[0x4f]:02x} SVBK={io[0x70]:02x}")
                 if t[5]:

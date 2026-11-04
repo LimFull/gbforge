@@ -174,7 +174,9 @@ static void ppu_init(void)
 #define LINE 456u
 #define FRAME (154u * LINE)
 static uint32_t frame_start;              // GB time of the current LCD frame's line 0
-static uint32_t pace_at, gb_paced;        // next real-time sync point, GB frames paced so far
+static uint32_t pace_at;                  // next real-time sync point (LCD off)
+static uint32_t sync_frame;               // real-time frame the next GB frame may not precede
+volatile uint32_t gb_paced;               // GB frames so far, purely in GB time: scenarios count these
 static uint32_t div_base, tima_at;        // DIV origin; next TIMA overflow
 static uint32_t vblank_line_done, lyc_done, hblank_line;  // per-frame event progress
 
@@ -219,11 +221,12 @@ static void skip_to_boundary(int mode_only)
 static void pace(void)                    // one GB frame done: don't run ahead of real time
 {
     gb_paced++;
-    if (gb_frames > gb_paced) {           // GB was slower than real time: that time is lost, as on
-        gb_lag_frames += gb_frames - gb_paced;  // hardware — never catch up by running fast later
-        gb_paced = gb_frames;
+    sync_frame++;
+    if (gb_frames > sync_frame) {         // GB was slower than real time: that time is lost, as on
+        gb_lag_frames += gb_frames - sync_frame;  // hardware — never catch up by running fast later
+        sync_frame = gb_frames;
     }
-    while (gb_frames < gb_paced) Halt();
+    while (gb_frames < sync_frame) Halt();
 }
 
 static void schedule(void)
@@ -566,6 +569,14 @@ static void hram_io_wait(uint16_t at)     // E2 05 20 FD C9: LDH (C),A / DEC B /
     gb.ret = pop16();
 }
 
+static void hram_jp(uint16_t at)          // C3 lo hi: a jump vector the game rewrites at run time
+{
+    const uint8_t *p = &gb_hram[at - 0xFF80];
+    gb.cyc += 16;
+    gb.jat = p[1] | p[2] << 8;
+    gb.jfn = gb_lookup(gb.jat);
+}
+
 static const struct { uint8_t len, bytes[5]; GbFn fn; } hram_stubs[] = {
     {5, {0xE2, 0x05, 0x20, 0xFD, 0xC9}, hram_io_wait},
 };
@@ -574,6 +585,7 @@ static GbFn hram_stub(uint16_t addr)
 {
     const uint8_t *p = &gb_hram[addr - 0xFF80];
     if (p[0] == 0x3E && p[2] == 0xE0 && p[3] == 0x46) return hram_dma_imm;  // operand byte varies
+    if (p[0] == 0xC3 && addr <= 0xFFFC) return hram_jp;
     for (unsigned i = 0; i < sizeof hram_stubs / sizeof *hram_stubs; i++) {
         unsigned n = hram_stubs[i].len, j = 0;
         while (j < n && p[j] == hram_stubs[i].bytes[j]) j++;
@@ -615,6 +627,8 @@ void gb_trap(uint16_t bank, uint16_t addr, uint8_t reason)
     REG_IME = 0;
     REG_DISPCNT = DCNT_MODE0 | DCNT_BG0;
     REG_BG0HOFS = REG_BG0VOFS = 0;
+    pal_bg_mem[0] = CLR_BLACK;            // the game's palettes may hide TTE's ink colour
+    for (int i = 1; i < 256; i++) pal_bg_mem[i] = CLR_WHITE;
     tte_init_se_default(0, BG_CBB(2) | BG_SBB(31));
     tte_printf("#{P:8,8}gbforge trap\n#{X:8}%s\n#{X:8}at %02X:%04X", names[reason < 6 ? reason : 0], bank, addr);
     for (;;) Halt();
