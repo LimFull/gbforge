@@ -1,0 +1,10 @@
+{
+  "description": "Dragon Quest I&II (Japan) sha256 7cae9c90…438caf — boot to title, press Start. Baseline for compat comparison; outputs stay in build/.",
+  "steps": [
+    {"step": 600},
+    {"shot": "intro"},
+    {"tap": ["start"], "press": 2, "after": 120},
+    {"shot": "title"},
+    {"read": "wram-c000", "memory_type": "gameboyMemory", "address": 49152, "length": 16}
+  ]
+}

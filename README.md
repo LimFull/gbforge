@@ -2,7 +2,7 @@
 
 > A tool that statically analyzes and recompiles the GB CPU code in `.gb` / `.gbc` ROMs into a `.gba` that **runs natively on real GBA hardware**.
 
-⚠️ **Status: design stage (pre-Phase 0).** The CLI below is the target design and does not work yet.
+⚠️ **Status: Phase 0 (environment & baseline).** Only `gb2gba inspect` works; the rest of the CLI below is the target design. See [reports/phase0.md](reports/phase0.md).
 
 The first commercial validation target is **Dragon Warrior I & II / Dragon Quest I & II (GB/GBC)**. Per-game plugins will later widen the view to the GBA's native 240×160 and improve tiles, palettes, and UI.
 
@@ -43,7 +43,29 @@ The GBA's GB compatibility mode is a separate hardware mode. This project produc
    └─ output/game.gba ── verify in mGBA → verify on hardware (EZ-Flash, etc.)
 ```
 
-## Target CLI (not implemented)
+## Development
+
+Requirements: git, CMake, Ninja, Python 3, [RGBDS](https://rgbds.gbdev.io/), devkitARM (native, or the `devkitpro/devkitarm` Docker image via `scripts/dkarm.sh`), [mGBA](https://mgba.io/), and [emucap](https://github.com/mcpads/emucap) with its Mesen2 package (GBA needs a BIOS you own).
+
+```bash
+cp local.env.example local.env            # set emucap / Mesen / BIOS paths
+scripts/setup-check.sh                    # report tool versions, exit 1 if something is missing
+
+python3 -m unittest discover -s tests     # host tests (inspect golden, checksum errors)
+tools/gb2gba.py inspect rom.gbc [--json]  # header, mapper, sizes, SHA-256
+
+make -C tests/fixtures/tiny               # rebuild our own test ROM (RGBDS)
+scripts/dkarm.sh make -C examples/hello-gba
+
+set -a; . ./local.env; set +a
+scripts/emucap_run.py tests/fixtures/tiny/tiny.gb tests/scenarios/tiny-smoke.json build/smoke/tiny
+scripts/emucap_run.py examples/hello-gba/hello.gba tests/scenarios/hello-gba-smoke.json build/smoke/hello
+scripts/mgba_peek.py examples/hello-gba/hello.gba 3 3000144:6   # mGBA cross-check via its GDB stub
+```
+
+`emucap_run.py` drives emucap's Control MCP over stdio (`scripts/mcp_client.py`), so it also works outside an agent session.
+
+## Target CLI (only `inspect` implemented)
 
 ```bash
 gb2gba inspect roms/game.gbc --json > reports/game.inspect.json
@@ -110,6 +132,7 @@ The original screen is **not scaled up**; more tiles are drawn from the same wor
 | [Pan Docs](https://gbdev.io/pandocs/) | Reference for GB hardware accuracy |
 | [mgbdis](https://github.com/mattcurrie/mgbdis) | GB ROM disassembler |
 | [mGBA](https://mgba.io/) · [SameBoy](https://github.com/LIJI32/SameBoy) | GBA run verification · GB reference comparison |
+| [emucap](https://github.com/mcpads/emucap) | Agent/MCP control of Mesen2 for both GB/GBC and GBA — original ↔ port differential checks (GPL; used only as an external process) |
 | [devkitPro / devkitARM](https://devkitpro.org/wiki/Getting_Started) | GBA cross-compilation |
 
 ## Copyright / ROM policy

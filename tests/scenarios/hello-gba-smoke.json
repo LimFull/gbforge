@@ -1,0 +1,11 @@
+{
+  "description": "hello.gba: g_frames=0x03000144(u32) g_keys=0x03000148(u16) — addresses from examples/hello-gba/hello.map, re-check after rebuild",
+  "steps": [
+    {"step": 400},
+    {"read": "idle", "memory_type": "gbaMemory", "address": 50331972, "length": 6},
+    {"tap": ["a", "right"], "press": 3, "after": 0},
+    {"read": "pressed", "memory_type": "gbaMemory", "address": 50331972, "length": 6},
+    {"step": 1},
+    {"shot": "after"}
+  ]
+}

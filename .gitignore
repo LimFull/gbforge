@@ -1,0 +1,35 @@
+# ROMs and saves — never commit commercial content
+roms/
+*.gb
+*.gbc
+*.sav
+*.srm
+# our own homebrew test ROMs are the only exception
+!tests/fixtures/**/*.gb
+
+# build output
+build/
+out/
+*.gba
+*.elf
+*.o
+*.d
+*.map
+*.sym
+
+# emucap artifacts (ledger, states, dumps, capture bundles)
+.emucap/
+*.mss
+*.mst
+*.ss0
+bundles/
+dumps/
+
+# local analysis output from commercial ROMs
+reports/local/
+
+.DS_Store
+__pycache__/
+
+# machine-specific paths
+local.env

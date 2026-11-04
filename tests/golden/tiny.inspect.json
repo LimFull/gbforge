@@ -1,0 +1,33 @@
+{
+  "errors": [],
+  "rom_header": {
+    "cartridge_type": {
+      "battery": false,
+      "code": "0x00",
+      "mapper": "ROM",
+      "name": "ROM",
+      "ram": false,
+      "rumble": false,
+      "timer": false
+    },
+    "cgb_flag": "0x00",
+    "cgb_mode": "dmg",
+    "destination": "japan",
+    "global_checksum": "0x3ECC",
+    "header_checksum": "0xA3",
+    "licensee": "0x00",
+    "logo_valid": true,
+    "manufacturer_code": null,
+    "ram_size": 0,
+    "rom_banks": 2,
+    "rom_size": 32768,
+    "sgb_support": false,
+    "title": "TINY",
+    "version": 0
+  },
+  "rom_sha1": "f6c2d60dd85da296e87d0ad1664b62821e95106a",
+  "rom_sha256": "133d82836e17e149046e572c64da8054f3d53c65d9bcd11158248c92c7a7791b",
+  "rom_size_bytes": 32768,
+  "tool_version": "0.0.1",
+  "warnings": []
+}

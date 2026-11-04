@@ -1,0 +1,14 @@
+{
+  "description": "tiny.gb: boot past the DMG boot ROM, move cursor right+down, press A (palette invert). wFrames=$C000(2) wJoyHeld=$C002 wPosX=$C003 wPosY=$C004",
+  "steps": [
+    {"step": 300},
+    {"read": "boot", "memory_type": "gameboyMemory", "address": 49152, "length": 5},
+    {"shot": "boot"},
+    {"tap": ["right"], "press": 2, "after": 2},
+    {"tap": ["right"], "press": 2, "after": 2},
+    {"tap": ["down"], "press": 2, "after": 2},
+    {"read": "moved", "memory_type": "gameboyMemory", "address": 49152, "length": 5},
+    {"tap": ["a"], "press": 2, "after": 2},
+    {"shot": "inverted"}
+  ]
+}
