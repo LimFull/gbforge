@@ -1,0 +1,114 @@
+{
+ "description": "DQ1&2 title \u2192 DQ1 \u2192 new adventure log \u2192 slot 1 \u2192 name entry (A presses, 150-frame gaps). Zeroed cart RAM.",
+ "steps": [
+  {
+   "write": {
+    "memory_type": "gbCartRam",
+    "address": 0,
+    "fill": 0,
+    "length": 8192
+   }
+  },
+  {
+   "until": {
+    "memory_type": "gameboyMemory",
+    "address": 51344
+   },
+   "eq": "40",
+   "max": 1500
+  },
+  {
+   "step": 240
+  },
+  {
+   "tap": [
+    "start"
+   ],
+   "press": 3,
+   "after": 150
+  },
+  {
+   "shot": "s1"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 150
+  },
+  {
+   "shot": "s2"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 150
+  },
+  {
+   "shot": "s3"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 150
+  },
+  {
+   "shot": "s4"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 150
+  },
+  {
+   "shot": "s5"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 150
+  },
+  {
+   "shot": "s6"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 150
+  },
+  {
+   "shot": "s7"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 150
+  },
+  {
+   "shot": "s8"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 150
+  },
+  {
+   "shot": "s9"
+  }
+ ]
+}

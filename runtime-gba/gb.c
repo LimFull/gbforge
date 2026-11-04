@@ -12,7 +12,8 @@
 
 GbCpu gb IWRAM_DATA;
 const uint8_t *gb_romx;
-uint8_t gb_wram[0x8000] EWRAM_BSS;
+uint8_t gb_wram[0x2000] IWRAM_DATA;      // banks 0-1 (C000-DFFF, incl. the usual stack): zero-wait IWRAM
+static uint8_t wram_hi[0x6000] EWRAM_BSS; // CGB banks 2-7
 uint8_t *gb_wramx;
 uint8_t gb_hram[0x80] IWRAM_DATA;
 const uint8_t *gb_rpage[256] IWRAM_DATA;
@@ -389,30 +390,36 @@ HOT uint8_t gb_read_io(uint8_t r)
     case 0x04: return (gb.cyc - div_base) >> 8;  // DIV: 16384 Hz
     case 0x05: return timer_tima();
     case 0x0F: return 0xE0 | IF;
-    case 0x41: {
-        for (int pass = 0;; pass++) {
-            uint8_t mode = 0, ly = 0;
-            if (LCDC & 0x80) {
-                uint32_t f = lcd_pos();
-                ly = line_of(f);
-                uint32_t x = f - ly * LINE;
-                mode = ly >= 144 ? 1 : x < 80 ? 2 : x < 252 ? 3 : 0;
-            }
-            uint8_t v = 0x80 | (io[0x41] & 0x78) | (ly == io[0x45]) << 2 | mode;
-            if (pass || !(LCDC & 0x80) || !polling(0x41, v)) return v;
-            skip_to_boundary(1);
-        }
-    }
-    case 0x44: {
-        uint8_t v = ppu_ly();
-        if (!(LCDC & 0x80) || !polling(0x44, v)) return v;
-        skip_to_boundary(0);
-        return poll_val = ppu_ly();
-    }
+    case 0x41: return gb_read_stat();
+    case 0x44: return gb_read_ly();
     case 0x69: return bg_pal[(io[0x68] & 0x3F) >> 1] >> ((io[0x68] & 1) * 8);
     case 0x6B: return obj_pal[(io[0x6A] & 0x3F) >> 1] >> ((io[0x6A] & 1) * 8);
     default: return io[r];
     }
+}
+
+HOT uint8_t gb_read_stat(void)
+{
+    for (int pass = 0;; pass++) {
+        uint8_t mode = 0, ly = 0;
+        if (LCDC & 0x80) {
+            uint32_t f = lcd_pos();
+            ly = line_of(f);
+            uint32_t x = f - ly * LINE;
+            mode = ly >= 144 ? 1 : x < 80 ? 2 : x < 252 ? 3 : 0;
+        }
+        uint8_t v = 0x80 | (io[0x41] & 0x78) | (ly == io[0x45]) << 2 | mode;
+        if (pass || !(LCDC & 0x80) || !polling(0x41, v)) return v;
+        skip_to_boundary(1);
+    }
+}
+
+HOT uint8_t gb_read_ly(void)
+{
+    uint8_t v = ppu_ly();
+    if (!(LCDC & 0x80) || !polling(0x44, v)) return v;
+    skip_to_boundary(0);
+    return poll_val = ppu_ly();
 }
 
 HOT void gb_write_io(uint8_t r, uint8_t v)
@@ -439,7 +446,12 @@ HOT void gb_write_io(uint8_t r, uint8_t v)
     case 0x69: palette_write(&io[0x68], bg_pal, v, 1); break;
     case 0x6B: palette_write(&io[0x6A], obj_pal, v, 0); break;
     case 0x70:                            // SVBK
-        if (cgb_mode) { gb_wramx = (uint8_t *)((uintptr_t)gb_wram + ((v & 7) ? (v & 7) : 1) * 0x1000 - 0xD000); map_wramx(); }
+        if (cgb_mode) {
+            unsigned b = (v & 7) ? (v & 7) : 1;
+            uint8_t *base = b == 1 ? gb_wram + 0x1000 : wram_hi + (b - 2) * 0x1000;
+            gb_wramx = (uint8_t *)((uintptr_t)base - 0xD000);
+            map_wramx();
+        }
         break;
     case 0x4F: map_vram(); break;
     }
@@ -483,8 +495,6 @@ HOT void gb_push16_slow(uint16_t sp, uint16_t v) { wr8(sp + 1, v >> 8); wr8(sp, 
 
 // ---- CPU control ------------------------------------------------------------------------
 
-void gb_ei(void) { gb.ime = 1; update_irq(); }  // ponytail: EI takes effect immediately, not after one instruction
-void gb_di(void) { gb.ime = 0; gb.irq = 0; }
 
 HOT int gb_service_irq(uint16_t resume)
 {

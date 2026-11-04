@@ -26,7 +26,7 @@ typedef struct { uint32_t key; GbFn fn; } GbEntry;  // key = bank << 16 | addr
 extern GbCpu gb;
 extern const uint8_t gb_rom[];
 extern const uint8_t *gb_romx;    // indexed with 0x4000..0x7FFF
-extern uint8_t gb_wram[0x8000];   // CGB: 8 x 4 KiB banks
+extern uint8_t gb_wram[0x2000];   // WRAM banks 0-1 (C000-DFFF); CGB banks 2-7 live in the runtime
 extern uint8_t *gb_wramx;         // indexed with 0xD000..0xDFFF
 extern uint8_t gb_hram[0x80];     // FF80..FFFF, [0x7F] = IE
 extern const uint8_t *gb_rpage[256];  // per 256-byte page: direct read pointer, 0 = slow path
@@ -56,8 +56,9 @@ int gb_poll(uint16_t resume);     // run due GB-time events, then service a pend
 int gb_halt(uint16_t resume);
 extern uint32_t gb_next_event;
 void gb_stop(uint16_t resume);
-void gb_ei(void);
-void gb_di(void);
+uint8_t gb_read_stat(void);
+uint8_t gb_read_ly(void);
+extern uint8_t io[0x80];         // FF00-FF7F stored values
 GbFn gb_lookup(uint16_t addr);    // compiled function holding addr in the current bank; traps if none
 int gb_trampoline(void);
 __attribute__((noreturn)) void gb_trap(uint16_t bank, uint16_t addr, uint8_t reason);
@@ -66,7 +67,7 @@ enum { TRAP_UNDEFINED = 1, TRAP_NO_ENTRY = 2, TRAP_RET_MISMATCH = 3, TRAP_STOP =
 
 // gb.irq is raised by the GBA VBlank ISR, so read it volatile (busy-wait loops must see it).
 #define GB_CALL(RET_, CALL_) do { uint16_t fs_ = gb.frame_sp; push16(RET_); gb.frame_sp = gb.sp; \
-    CALL_; int dead_ = gb_trampoline(); gb.frame_sp = fs_; \
+    CALL_; int dead_ = gb.jfn ? gb_trampoline() : 0; gb.frame_sp = fs_; \
     if (dead_ || gb.ret != (RET_)) return; } while (0)
 
 #define GB_JUMP(TGT_, FN_) do { gb.jat = (TGT_); gb.jfn = (FN_); return; } while (0)
@@ -74,6 +75,10 @@ enum { TRAP_UNDEFINED = 1, TRAP_NO_ENTRY = 2, TRAP_RET_MISMATCH = 3, TRAP_STOP =
 #define GB_SAFEPOINT(resume) do { if ((gb.irq || (int32_t)(gb.cyc - gb_next_event) >= 0) && gb_poll(resume)) return; } while (0)
 
 // ---- memory -------------------------------------------------------------------------
+
+static inline __attribute__((always_inline)) void gb_di(void) { gb.ime = 0; gb.irq = 0; }
+// ponytail: EI takes effect immediately (codegen adds a safepoint right after it)
+static inline __attribute__((always_inline)) void gb_ei(void) { gb.ime = 1; gb.irq = (gb_hram[0x7F] & io[0x0F] & 0x1F) != 0; }
 
 // Constant addresses fold to a direct access at compile time; others go through the page table.
 static inline __attribute__((always_inline)) uint8_t rd8(uint16_t a)
@@ -88,6 +93,8 @@ static inline __attribute__((always_inline)) uint8_t rd8(uint16_t a)
     if ((uint16_t)(a - 0xC000) < 0x1000) return gb_wram[a - 0xC000];
     if ((uint16_t)(a - 0xD000) < 0x1000) return gb_wramx[a];
     if (a >= 0xFF80 && a != 0xFFFF) return gb_hram[a - 0xFF80];
+    if (a == 0xFF41) return gb_read_stat();  // wait loops poll these
+    if (a == 0xFF44) return gb_read_ly();
     return gb_read_slow(a);
 }
 

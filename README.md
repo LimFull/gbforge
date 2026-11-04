@@ -2,7 +2,7 @@
 
 > A tool that statically analyzes and recompiles the GB CPU code in `.gb` / `.gbc` ROMs into a `.gba` that **runs natively on real GBA hardware**.
 
-⚠️ **Status: Phase 2 PoC.** `inspect`, `analyze`, `port` and `verify` work. Our own homebrew test ROM runs on the GBA as strict native Thumb code (no interpreter), and its memory and screen match the original. Dragon Quest builds and fits in 32 MiB (17–18 MB), but it is still blocked by unresolved paths and doesn't boot yet. See [reports/phase1-2.md](reports/phase1-2.md).
+⚠️ **Status: Phase 3 in progress.** Our homebrew test ROM runs on the GBA as strict native code and matches the original. Dragon Quest I&II boots and its title → menus → name entry match the original under emucap. It runs as a research build: the strict gate is bypassed and unresolved paths trap instead of using an interpreter. Field, battle and save come next. See [reports/phase3.md](reports/phase3.md).
 
 The first commercial validation target is **Dragon Warrior I & II / Dragon Quest I & II (GB/GBC)**. Per-game plugins will later widen the view to the GBA's native 240×160 and improve tiles, palettes, and UI.
 
