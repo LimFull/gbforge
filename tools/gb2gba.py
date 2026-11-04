@@ -2,13 +2,27 @@
 """gb2gba — GB/GBC → GBA native porter CLI.
 
   gb2gba inspect ROM [--json]
+  gb2gba analyze ROM --out DIR [--no-scan] [--entry BB:AAAA]... [--trace FILE]
+  gb2gba port ROM --output OUT.gba [--native-policy strict] [--no-scan] [--entry BB:AAAA]... [--trace FILE]
+  gb2gba verify ROM PORT.gba --scenario SCENARIO.json --out DIR     (needs emucap, see local.env.example)
 
-Exit codes: 0 ok, 2 invalid or unsupported ROM (see README).
+Exit codes: 0 ok, 2 invalid ROM, 3 unresolved paths (strict), 5 over budget, 6 external tool error,
+8 port differs from the original.
 """
 import argparse
 import hashlib
 import json
+import os
+import re
+import shutil
+import struct
+import subprocess
 import sys
+import zlib
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CORE = os.environ.get("GBFORGE_CORE", os.path.join(ROOT, "build", "core", "gbforge-core"))
+GBA_ROM_LIMIT = 32 << 20
 
 TOOL_VERSION = "0.0.1"
 
@@ -138,6 +152,203 @@ def cmd_inspect(args):
     return code
 
 
+def core(args):
+    """Run gbforge-core (C++ analyzer/codegen on gb-recompiled's gbrecomp_core)."""
+    if not os.path.exists(CORE):
+        raise SystemExit("gbforge-core not built: cmake -G Ninja -B build/core . && ninja -C build/core")
+    r = subprocess.run([CORE, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if r.returncode not in (0, 3):
+        sys.stderr.write(r.stderr[-2000:])
+    return r.returncode
+
+
+def analysis_args(args):
+    out = ["--no-scan"] if args.no_scan else []
+    for e in args.entry or []:
+        out += ["--entry", e]
+    if args.trace:
+        out += ["--trace", args.trace]
+    return out
+
+
+def inspect_or_exit(path):
+    with open(path, "rb") as f:
+        rom = f.read()
+    try:
+        return rom, inspect(rom)
+    except RomError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
+
+
+def cmd_analyze(args):
+    rom, report = inspect_or_exit(args.rom)
+    os.makedirs(args.out, exist_ok=True)
+    out = os.path.join(args.out, "analysis.json")
+    if core(["analyze", args.rom, out, *analysis_args(args)]) != 0:
+        return 2
+    with open(out) as f:
+        summary = json.load(f)["summary"]
+    report.update({"analysis": summary, "unresolved_edges": summary["unresolved_edges"]})
+    with open(os.path.join(args.out, "summary.json"), "w") as f:
+        json.dump(report, f, indent=2, sort_keys=True)
+    print(json.dumps(summary, indent=2))
+    return 0
+
+
+def read_symbols(path):
+    syms = {}
+    with open(path) as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) == 3:
+                syms[parts[2]] = int(parts[0], 16)
+    return syms
+
+
+def write_map(sym_path, map_path, header):
+    syms = read_symbols(sym_path)
+    cgb = header["cgb_mode"] != "dmg"
+    functions = {f"{m.group(1)}:{m.group(2)}": f"0x{a:08X}"
+                 for name, a in sorted(syms.items()) if (m := re.fullmatch(r"f_([0-9A-F]{2})_([0-9A-F]{4})", name))}
+    doc = {
+        "schema": "gbforge.map", "schema_version": 1,
+        "memory": {
+            "cpu": f"0x{syms['gb']:08X}",
+            "trap": f"0x{syms['gb_trap_info']:08X}",
+            "wram": {"gb": "0xC000", "gba": f"0x{syms['gb_wram']:08X}", "size": 0x8000 if cgb else 0x2000},
+            "hram": {"gb": "0xFF80", "gba": f"0x{syms['gb_hram']:08X}", "size": 0x7F},
+        },
+        "functions": functions,
+    }
+    with open(map_path, "w") as f:
+        json.dump(doc, f, indent=2)
+
+
+def cmd_port(args):
+    rom, report = inspect_or_exit(args.rom)
+    out = os.path.abspath(args.output)
+    stem = os.path.splitext(os.path.basename(out))[0]
+    work = os.path.join(ROOT, "build", "port", stem)
+    gen = os.path.join(work, "gen")
+    shutil.rmtree(gen, ignore_errors=True)
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    report["native_policy"] = args.native_policy
+    report_path = os.path.splitext(out)[0] + ".report.json"
+
+    def finish(code, **extra):
+        report.update(extra)
+        with open(report_path, "w") as f:
+            json.dump(report, f, indent=2, sort_keys=True)
+        return code
+
+    if core(["codegen", args.rom, gen, *analysis_args(args)]) != 0:
+        return finish(3, errors=["codegen failed (see stderr)"])
+    with open(os.path.join(gen, "codegen.json")) as f:
+        cg = json.load(f)
+    report["codegen"] = {k: cg[k] for k in ("functions", "entries", "stats")}
+    unresolved = cg["unresolved"]
+    report["unresolved_edges"] = cg["analysis_unresolved_edges"] + len(unresolved)
+    if args.native_policy == "strict" and report["unresolved_edges"]:
+        print(f"blocked: {report['unresolved_edges']} unresolved edges (strict); see {report_path}", file=sys.stderr)
+        return finish(3, unresolved=unresolved, errors=["unresolved_edges"])
+
+    shutil.copyfile(args.rom, os.path.join(gen, "rom.gb"))
+    with open(os.path.join(gen, "rom.s"), "w") as f:
+        f.write('.section .rodata\n.global gb_rom\n.balign 4\ngb_rom:\n.incbin "rom.gb"\n')
+    title = re.sub(r"[^A-Z0-9]", "", report["rom_header"]["title"].upper())[:12] or "GBFORGE"
+    make = [os.path.join(ROOT, "scripts", "dkarm.sh"), "make", "-s", f"-j{os.cpu_count() or 4}",
+            "-C", os.path.join(ROOT, "runtime-gba"), f"GEN={gen}", f"OUT={out}", f"TITLE={title}"]
+    for stale in (out, os.path.splitext(out)[0] + ".map.json"):
+        if os.path.exists(stale):
+            os.remove(stale)  # never leave a previous build behind a failed one
+    if subprocess.run(make).returncode != 0:
+        return finish(6, errors=["GBA build failed"])
+    size = os.path.getsize(out)
+    report["build_sizes"] = {"gba_bytes": size}
+    if size > GBA_ROM_LIMIT:
+        return finish(5, errors=[f"{size} bytes exceeds the 32 MiB GBA ROM limit"])
+    write_map(os.path.splitext(out)[0] + ".sym", os.path.splitext(out)[0] + ".map.json", report["rom_header"])
+    print(f"{out}: {size} bytes, {cg['functions']} GB functions, strict native")
+    return finish(0)
+
+
+def read_png(path):
+    """Minimal PNG decoder (8-bit RGB/RGBA, non-interlaced) → (width, height, rows of pixel tuples)."""
+    with open(path, "rb") as f:
+        data = f.read()
+    pos, idat = 8, b""
+    while pos < len(data):
+        n, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + n]
+        if kind == b"IHDR":
+            w, h, depth, ctype, _, _, interlace = struct.unpack(">IIBBBBB", body)
+            if depth != 8 or ctype not in (2, 6) or interlace:
+                raise ValueError(f"unsupported PNG {path}")
+            bpp = 3 if ctype == 2 else 4
+        elif kind == b"IDAT":
+            idat += body
+        pos += 12 + n
+    raw, stride, prev, rows = zlib.decompress(idat), w * bpp, bytearray(w * bpp), []
+    for y in range(h):
+        ftype, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - bpp] if i >= bpp else 0
+            b, c = prev[i], prev[i - bpp] if i >= bpp else 0
+            pred = {0: 0, 1: a, 2: b, 3: (a + b) // 2,
+                    4: min((a, b, c), key=lambda v: (abs(a + b - c - v), (a, b, c).index(v)))}[ftype]
+            line[i] = (line[i] + pred) & 0xFF
+        rows.append([tuple(line[x * bpp:x * bpp + 3]) for x in range(w)])
+        prev = line
+    return w, h, rows
+
+
+def same_picture(gb_png, gba_png):
+    """GB 160x144 vs the port's letterboxed 240x160 at (40,8), equal up to a palette bijection."""
+    gw, gh, g = read_png(gb_png)
+    aw, ah, a = read_png(gba_png)
+    if (gw, gh) != (160, 144) or (aw, ah) != (240, 160):
+        return False, f"unexpected sizes {gw}x{gh} / {aw}x{ah}"
+    fwd, back = {}, {}
+    for y in range(144):
+        for x in range(160):
+            p, q = g[y][x], a[y + 8][x + 40]
+            if fwd.setdefault(p, q) != q or back.setdefault(q, p) != p:
+                return False, f"pixel ({x},{y}) differs"
+    return True, f"{len(fwd)} colours"
+
+
+def cmd_verify(args):
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    import emucap_run
+    with open(args.scenario) as f:
+        scenario = json.load(f)
+    with open(os.path.splitext(args.port)[0] + ".map.json") as f:
+        tr = emucap_run.gb_to_gba(json.load(f))
+    try:
+        orig = emucap_run.run(os.path.abspath(args.rom), scenario, os.path.join(args.out, "original"))
+        port = emucap_run.run(os.path.abspath(args.port), scenario, os.path.join(args.out, "port"), tr)
+    except Exception as e:  # emucap/emulator failures are external-tool errors, not mismatches
+        print(f"error: {e}", file=sys.stderr)
+        return 6
+    checks = []
+    for label, want in orig["reads"].items():
+        got = port["reads"].get(label)
+        checks.append({"check": f"read:{label}", "ok": got == want, "original": want, "port": got})
+    for label in orig["shots"]:
+        ok, why = same_picture(os.path.join(args.out, "original", label + ".png"),
+                               os.path.join(args.out, "port", label + ".png"))
+        checks.append({"check": f"shot:{label}", "ok": ok, "detail": why})
+    ok = all(c["ok"] for c in checks)
+    with open(os.path.join(args.out, "verify.json"), "w") as f:
+        json.dump({"tool_version": TOOL_VERSION, "rom_sha256": orig["rom_sha256"], "port_sha256": port["rom_sha256"],
+                   "scenario": os.path.basename(args.scenario), "status": "pass" if ok else "mismatch",
+                   "checks": checks}, f, indent=2)
+    for c in checks:
+        print(f"{'ok  ' if c['ok'] else 'FAIL'} {c['check']}  {c.get('detail') or c['port']}")
+    return 0 if ok else 8
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="gb2gba")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -145,6 +356,25 @@ def main(argv=None):
     i.add_argument("rom")
     i.add_argument("--json", action="store_true")
     i.set_defaults(func=cmd_inspect)
+    v = sub.add_parser("verify", help="run a scenario on the original and the port via emucap, compare")
+    v.add_argument("rom")
+    v.add_argument("port")
+    v.add_argument("--scenario", required=True)
+    v.add_argument("--out", required=True)
+    v.set_defaults(func=cmd_verify)
+    for name, func in (("analyze", cmd_analyze), ("port", cmd_port)):
+        c = sub.add_parser(name)
+        c.add_argument("rom")
+        c.add_argument("--no-scan", action="store_true", help="disable aggressive scan for unreferenced code")
+        c.add_argument("--entry", action="append", help="extra entry point BB:AAAA (repeatable)")
+        c.add_argument("--trace", help="gb-recompiled trace file of executed bank:addr entries")
+        c.set_defaults(func=func)
+        if name == "analyze":
+            c.add_argument("--out", required=True)
+        else:
+            c.add_argument("--output", required=True)
+            c.add_argument("--native-policy", choices=["strict"], default="strict",
+                           help="strict: no interpreter, block on unresolved edges (hybrid is not implemented)")
     args = p.parse_args(argv)
     return args.func(args)
 

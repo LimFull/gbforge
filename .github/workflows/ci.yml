@@ -11,15 +11,22 @@ jobs:
           python-version: "3.12"
       - run: python -m unittest discover -s tests -v
 
-  gba-smoke:
+  # gbforge-core (analyzer + codegen) and both GBA builds, in the devkitARM image
+  port-smoke:
     runs-on: ubuntu-latest
     container: devkitpro/devkitarm
     steps:
+      - run: apt-get update && apt-get install -y --no-install-recommends cmake ninja-build python3 git ca-certificates
       - uses: actions/checkout@v7
+      - run: cmake -G Ninja -B build/core . && ninja -C build/core gbforge-core
       - run: make -C examples/hello-gba
+      - run: python3 tools/gb2gba.py analyze tests/fixtures/tiny/tiny.gb --out build/tiny
+      - run: python3 tools/gb2gba.py port tests/fixtures/tiny/tiny.gb --output out/tiny.gba
       - uses: actions/upload-artifact@v7
         with:
-          name: hello-gba
+          name: gba
           path: |
             examples/hello-gba/hello.gba
-            examples/hello-gba/hello.map
+            out/tiny.gba
+            out/tiny.map.json
+            out/tiny.report.json

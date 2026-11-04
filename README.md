@@ -2,7 +2,7 @@
 
 > A tool that statically analyzes and recompiles the GB CPU code in `.gb` / `.gbc` ROMs into a `.gba` that **runs natively on real GBA hardware**.
 
-⚠️ **Status: Phase 0 (environment & baseline).** Only `gb2gba inspect` works; the rest of the CLI below is the target design. See [reports/phase0.md](reports/phase0.md).
+⚠️ **Status: Phase 2 PoC.** `inspect`, `analyze`, `port` and `verify` work. Our own homebrew test ROM runs on the GBA as strict native Thumb code (no interpreter), and its memory and screen match the original. Dragon Quest builds and fits in 32 MiB (17–18 MB), but it is still blocked by unresolved paths and doesn't boot yet. See [reports/phase1-2.md](reports/phase1-2.md).
 
 The first commercial validation target is **Dragon Warrior I & II / Dragon Quest I & II (GB/GBC)**. Per-game plugins will later widen the view to the GBA's native 240×160 and improve tiles, palettes, and UI.
 
@@ -51,8 +51,12 @@ Requirements: git, CMake, Ninja, Python 3, [RGBDS](https://rgbds.gbdev.io/), dev
 cp local.env.example local.env            # set emucap / Mesen / BIOS paths
 scripts/setup-check.sh                    # report tool versions, exit 1 if something is missing
 
-python3 -m unittest discover -s tests     # host tests (inspect golden, checksum errors)
+python3 -m unittest discover -s tests     # host tests (inspect golden, checksum errors, verify compare)
 tools/gb2gba.py inspect rom.gbc [--json]  # header, mapper, sizes, SHA-256
+
+cmake -G Ninja -B build/core . && ninja -C build/core gbforge-core   # analyzer + codegen (C++)
+tools/gb2gba.py analyze tests/fixtures/tiny/tiny.gb --out build/tiny
+tools/gb2gba.py port tests/fixtures/tiny/tiny.gb --output out/tiny.gba
 
 make -C tests/fixtures/tiny               # rebuild our own test ROM (RGBDS)
 scripts/dkarm.sh make -C examples/hello-gba
@@ -61,11 +65,14 @@ set -a; . ./local.env; set +a
 scripts/emucap_run.py tests/fixtures/tiny/tiny.gb tests/scenarios/tiny-smoke.json build/smoke/tiny
 scripts/emucap_run.py examples/hello-gba/hello.gba tests/scenarios/hello-gba-smoke.json build/smoke/hello
 scripts/mgba_peek.py examples/hello-gba/hello.gba 3 3000144:6   # mGBA cross-check via its GDB stub
+tools/gb2gba.py verify tests/fixtures/tiny/tiny.gb out/tiny.gba --scenario tests/scenarios/tiny-diff.json --out build/verify/tiny
 ```
+
+How a port works: `gbforge-core` links gb-recompiled's analyzer and turns each analyzed GB function into a C function (`runtime-gba/gb.h` is the contract). `runtime-gba/gb.c` provides the GB memory map, MBC, IO and interrupts. It mirrors GB VRAM writes straight into GBA BG hardware and reads the GB ROM in place from the cartridge.
 
 `emucap_run.py` drives emucap's Control MCP over stdio (`scripts/mcp_client.py`), so it also works outside an agent session.
 
-## Target CLI (only `inspect` implemented)
+## Target CLI (`--plugin`, `--renderer enhanced`, `--viewport`, `--graphics` not implemented yet)
 
 ```bash
 gb2gba inspect roms/game.gbc --json > reports/game.inspect.json

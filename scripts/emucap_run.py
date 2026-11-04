@@ -5,6 +5,8 @@ usage: scripts/emucap_run.py ROM SCENARIO.json OUTDIR
 
 Scenario: {"steps": [
   {"step": 300},                                   # advance frames
+  {"until": {"memory_type": "gameboyMemory", "address": 49152}, "eq": "0a00", "max": 900},  # align on game state
+                                                   # ("ge": n compares one byte; "eq": exact hex bytes)
   {"tap": ["right"], "press": 2, "after": 2},     # frame-exact input
   {"read": "label", "memory_type": "gameboyMemory", "address": 49152, "length": 5},
   {"shot": "label"}                                # OUTDIR/label.png
@@ -23,7 +25,21 @@ from mcp_client import Mcp
 EMUCAP_MCP = os.environ.get("EMUCAP_MCP") or shutil.which("emucap-mcp")
 
 
-def run(rom, scenario, outdir):
+def gb_to_gba(map_doc):
+    """Translate GB-address reads to the port's GBA addresses using gb2gba's .map.json."""
+    regions = [(int(r["gb"], 16), int(r["gba"], 16), r["size"]) for r in map_doc["memory"].values() if isinstance(r, dict)]
+
+    def tr(spec):
+        if spec["memory_type"] != "gameboyMemory":
+            return spec
+        for gb, gba, size in regions:
+            if gb <= spec["address"] < gb + size:
+                return dict(spec, memory_type="gbaMemory", address=gba + spec["address"] - gb)
+        raise SystemExit(f"GB address {spec['address']:#x} is not mapped in the port")
+    return tr
+
+
+def run(rom, scenario, outdir, translate=lambda spec: spec):
     os.makedirs(outdir, exist_ok=True)
     result = {"rom": os.path.basename(rom),
               "rom_sha256": hashlib.sha256(open(rom, "rb").read()).hexdigest(),
@@ -45,9 +61,18 @@ def run(rom, scenario, outdir):
                 elif "tap" in s:
                     m.call("tap", {"buttons": s["tap"], "press_frames": s.get("press", 2),
                                    "after_frames": s.get("after", 1)})
+                elif "until" in s:
+                    spec = translate(dict(s["until"], length=len(s["eq"]) // 2 if "eq" in s else 1))
+                    for _ in range(s.get("max", 1000)):
+                        h = m.call("read_memory", spec)["hex"]
+                        if (h == s["eq"]) if "eq" in s else int(h, 16) >= s["ge"]:
+                            break
+                        m.call("step", {"count": 1})
+                    else:
+                        raise SystemExit(f"until: condition not reached within {s.get('max', 1000)} frames")
                 elif "read" in s:
-                    r = m.call("read_memory", {k: s[k] for k in ("memory_type", "address", "length")})
-                    result["reads"][s["read"]] = r["hex"]
+                    spec = translate({k: s[k] for k in ("memory_type", "address", "length")})
+                    result["reads"][s["read"]] = m.call("read_memory", spec)["hex"]
                 elif "shot" in s:
                     r = m.call("screenshot", {"save_path": os.path.join(outdir, s["shot"] + ".png")})
                     result["shots"][s["shot"]] = r["provenance"]["sha256"]
@@ -66,4 +91,6 @@ if __name__ == "__main__":
     if not EMUCAP_MCP:
         raise SystemExit("emucap-mcp not found: set EMUCAP_MCP (see local.env.example)")
     rom, scen, out = sys.argv[1:]
-    print(json.dumps(run(os.path.abspath(rom), json.load(open(scen)), os.path.abspath(out)), indent=2))
+    map_path = os.path.splitext(rom)[0] + ".map.json"
+    tr = gb_to_gba(json.load(open(map_path))) if rom.endswith(".gba") and os.path.exists(map_path) else (lambda s: s)
+    print(json.dumps(run(os.path.abspath(rom), json.load(open(scen)), os.path.abspath(out), tr), indent=2))
