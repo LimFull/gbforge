@@ -1,0 +1,513 @@
+{
+ "steps": [
+  {
+   "write": {
+    "memory_type": "gbCartRam",
+    "address": 0,
+    "fill": 0,
+    "length": 8192
+   }
+  },
+  {
+   "until": {
+    "memory_type": "gameboyMemory",
+    "address": 51344
+   },
+   "eq": "40",
+   "max": 1500
+  },
+  {
+   "step": 240
+  },
+  {
+   "tap": [
+    "start"
+   ],
+   "press": 3,
+   "after": 150
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "shot": "s3"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 30
+  },
+  {
+   "tap": [
+    "down"
+   ],
+   "press": 3,
+   "after": 20
+  },
+  {
+   "tap": [
+    "down"
+   ],
+   "press": 3,
+   "after": 20
+  },
+  {
+   "tap": [
+    "down"
+   ],
+   "press": 3,
+   "after": 20
+  },
+  {
+   "tap": [
+    "down"
+   ],
+   "press": 3,
+   "after": 20
+  },
+  {
+   "tap": [
+    "right"
+   ],
+   "press": 3,
+   "after": 20
+  },
+  {
+   "tap": [
+    "right"
+   ],
+   "press": 3,
+   "after": 20
+  },
+  {
+   "tap": [
+    "right"
+   ],
+   "press": 3,
+   "after": 20
+  },
+  {
+   "tap": [
+    "right"
+   ],
+   "press": 3,
+   "after": 20
+  },
+  {
+   "tap": [
+    "right"
+   ],
+   "press": 3,
+   "after": 20
+  },
+  {
+   "tap": [
+    "right"
+   ],
+   "press": 3,
+   "after": 20
+  },
+  {
+   "tap": [
+    "right"
+   ],
+   "press": 3,
+   "after": 20
+  },
+  {
+   "tap": [
+    "right"
+   ],
+   "press": 3,
+   "after": 20
+  },
+  {
+   "tap": [
+    "right"
+   ],
+   "press": 3,
+   "after": 20
+  },
+  {
+   "tap": [
+    "right"
+   ],
+   "press": 3,
+   "after": 20
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "shot": "n2"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "shot": "n8"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "shot": "n13"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "shot": "n20"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "shot": "n32"
+  },
+  {
+   "tap": [
+    "up"
+   ],
+   "press": 30,
+   "after": 40
+  },
+  {
+   "shot": "k0"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "shot": "k1"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "shot": "k2"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "shot": "k5"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 3,
+   "after": 100
+  },
+  {
+   "shot": "k11"
+  }
+ ],
+ "shot_tolerance": 160,
+ "description": "DQ1: boot \u2192 name \u2192 intro \u2192 throne room \u2192 king's speech \u2192 step up \u2192 talk to the king. Scenario frames are GB frames on the port; keep one GBA session under ~7000 frames (Mesen GBA crash)."
+}
