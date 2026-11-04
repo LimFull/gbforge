@@ -2,8 +2,8 @@
 """gb2gba — GB/GBC → GBA native porter CLI.
 
   gb2gba inspect ROM [--json]
-  gb2gba analyze ROM --out DIR [--no-scan] [--entry BB:AAAA]... [--trace FILE]
-  gb2gba port ROM --output OUT.gba [--native-policy strict] [--no-scan] [--entry BB:AAAA]... [--trace FILE]
+  gb2gba analyze ROM --out DIR [--no-scan] [--entry BB:AAAA]... [--trace FILE] [--cdl FILE]
+  gb2gba port ROM --output OUT.gba [--native-policy strict] [--no-scan] [--entry BB:AAAA]... [--cdl FILE]
   gb2gba verify ROM PORT.gba --scenario SCENARIO.json --out DIR     (needs emucap, see local.env.example)
 
 Exit codes: 0 ok, 2 invalid ROM, 3 unresolved paths (strict), 5 over budget, 6 external tool error,
@@ -168,6 +168,8 @@ def analysis_args(args):
         out += ["--entry", e]
     if args.trace:
         out += ["--trace", args.trace]
+    if args.cdl:
+        out += ["--cdl", args.cdl]
     return out
 
 
@@ -208,7 +210,6 @@ def read_symbols(path):
 
 def write_map(sym_path, map_path, header):
     syms = read_symbols(sym_path)
-    cgb = header["cgb_mode"] != "dmg"
     functions = {f"{m.group(1)}:{m.group(2)}": f"0x{a:08X}"
                  for name, a in sorted(syms.items()) if (m := re.fullmatch(r"f_([0-9A-F]{2})_([0-9A-F]{4})", name))}
     doc = {
@@ -216,8 +217,14 @@ def write_map(sym_path, map_path, header):
         "memory": {
             "cpu": f"0x{syms['gb']:08X}",
             "trap": f"0x{syms['gb_trap_info']:08X}",
-            "wram": {"gb": "0xC000", "gba": f"0x{syms['gb_wram']:08X}", "size": 0x8000 if cgb else 0x2000},
-            "hram": {"gb": "0xFF80", "gba": f"0x{syms['gb_hram']:08X}", "size": 0x7F},
+            "frames": f"0x{syms['gb_frames']:08X}",          # u32 GBA VBlanks, then u32 lag frames
+            "lag_frames": f"0x{syms['gb_lag_frames']:08X}",
+            **({"profile": {"pcs": f"0x{syms['gb_prof_pcs']:08X}", "count": f"0x{syms['gb_prof_count']:08X}", "size": 4096}}
+               if "gb_prof_pcs" in syms else {}),
+            # GB-visible windows. D000-DFFF matches only while SVBK selects bank 0/1 (CGB).
+            "wram": {"gb": "0xC000", "gba": f"0x{syms['gb_wram']:08X}", "size": 0x2000},
+            "io": {"gb": "0xFF00", "gba": f"0x{syms['io']:08X}", "size": 0x80},  # stored values; LY/STAT/P1/DIV are computed on read
+            "hram": {"gb": "0xFF80", "gba": f"0x{syms['gb_hram']:08X}", "size": 0x80},  # FFFF = IE
         },
         "functions": functions,
     }
@@ -249,9 +256,15 @@ def cmd_port(args):
     report["codegen"] = {k: cg[k] for k in ("functions", "entries", "stats")}
     unresolved = cg["unresolved"]
     report["unresolved_edges"] = cg["analysis_unresolved_edges"] + len(unresolved)
+    report["unresolved"] = sorted(set(unresolved))
     if args.native_policy == "strict" and report["unresolved_edges"]:
-        print(f"blocked: {report['unresolved_edges']} unresolved edges (strict); see {report_path}", file=sys.stderr)
-        return finish(3, unresolved=unresolved, errors=["unresolved_edges"])
+        if not args.allow_unresolved:
+            print(f"blocked: {report['unresolved_edges']} unresolved edges (strict); see {report_path}", file=sys.stderr)
+            return finish(3, errors=["unresolved_edges"])
+        # research build: still no interpreter — unresolved targets trap at run time
+        report["gate"] = "bypassed"
+        report.setdefault("warnings", []).append("strict gate bypassed (--allow-unresolved): not a native result")
+        print(f"warning: {report['unresolved_edges']} unresolved edges, gate bypassed", file=sys.stderr)
 
     shutil.copyfile(args.rom, os.path.join(gen, "rom.gb"))
     with open(os.path.join(gen, "rom.s"), "w") as f:
@@ -259,6 +272,9 @@ def cmd_port(args):
     title = re.sub(r"[^A-Z0-9]", "", report["rom_header"]["title"].upper())[:12] or "GBFORGE"
     make = [os.path.join(ROOT, "scripts", "dkarm.sh"), "make", "-s", f"-j{os.cpu_count() or 4}",
             "-C", os.path.join(ROOT, "runtime-gba"), f"GEN={gen}", f"OUT={out}", f"TITLE={title}"]
+    if args.profile:
+        make.append("EXTRA_CFLAGS=-DGB_PROFILE")
+        report.setdefault("warnings", []).append("profiling build (timer IRQ sampler)")
     for stale in (out, os.path.splitext(out)[0] + ".map.json"):
         if os.path.exists(stale):
             os.remove(stale)  # never leave a previous build behind a failed one
@@ -269,7 +285,8 @@ def cmd_port(args):
     if size > GBA_ROM_LIMIT:
         return finish(5, errors=[f"{size} bytes exceeds the 32 MiB GBA ROM limit"])
     write_map(os.path.splitext(out)[0] + ".sym", os.path.splitext(out)[0] + ".map.json", report["rom_header"])
-    print(f"{out}: {size} bytes, {cg['functions']} GB functions, strict native")
+    print(f"{out}: {size} bytes, {cg['functions']} GB functions, "
+          + ("strict gate BYPASSED" if report.get("gate") == "bypassed" else "strict native"))
     return finish(0)
 
 
@@ -368,6 +385,7 @@ def main(argv=None):
         c.add_argument("--no-scan", action="store_true", help="disable aggressive scan for unreferenced code")
         c.add_argument("--entry", action="append", help="extra entry point BB:AAAA (repeatable)")
         c.add_argument("--trace", help="gb-recompiled trace file of executed bank:addr entries")
+        c.add_argument("--cdl", help="Mesen CDL of the original run (scripts/mesen_cdl.py): entries + data ranges")
         c.set_defaults(func=func)
         if name == "analyze":
             c.add_argument("--out", required=True)
@@ -375,6 +393,9 @@ def main(argv=None):
             c.add_argument("--output", required=True)
             c.add_argument("--native-policy", choices=["strict"], default="strict",
                            help="strict: no interpreter, block on unresolved edges (hybrid is not implemented)")
+            c.add_argument("--profile", action="store_true", help="link the sampling profiler (scripts/port_profile.py)")
+            c.add_argument("--allow-unresolved", action="store_true",
+                           help="research build: build despite unresolved edges (they trap at run time)")
     args = p.parse_args(argv)
     return args.func(args)
 

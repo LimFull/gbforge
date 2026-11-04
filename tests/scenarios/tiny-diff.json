@@ -1,19 +1,92 @@
 {
-  "description": "tiny.gb original vs port: align on exact state wFrames=10,x=10,y=9, then identical frame-exact input. wFrames=$C000(2) wJoyHeld=$C002 wPosX=$C003 wPosY=$C004",
+  "description": "tiny.gb original vs port: align on exact state wFrames=10,x=10,y=9 (write breakpoint), then identical input. Taps hold >= 2 frames: Mesen GB and Mesen GBA place frame boundaries at different video phases, so 1-frame taps are ambiguous between emulators, not between original and port. wFrames=$C000(2) wJoyHeld=$C002 wPosX=$C003 wPosY=$C004",
   "steps": [
-    {"until": {"memory_type": "gameboyMemory", "address": 49152}, "eq": "0a00000a09", "max": 900},
-    {"read": "aligned", "memory_type": "gameboyMemory", "address": 49152, "length": 5},
-    {"shot": "aligned"},
-    {"tap": ["right"], "press": 2, "after": 2},
-    {"tap": ["right"], "press": 2, "after": 2},
-    {"tap": ["down"], "press": 2, "after": 2},
-    {"read": "moved", "memory_type": "gameboyMemory", "address": 49152, "length": 5},
-    {"tap": ["left"], "press": 1, "after": 1},
-    {"tap": ["up"], "press": 1, "after": 1},
-    {"tap": ["up"], "press": 1, "after": 1},
-    {"read": "moved2", "memory_type": "gameboyMemory", "address": 49152, "length": 5},
-    {"tap": ["a"], "press": 2, "after": 2},
-    {"read": "inverted", "memory_type": "gameboyMemory", "address": 49152, "length": 5},
-    {"shot": "inverted"}
+    {
+      "until": {
+        "memory_type": "gameboyMemory",
+        "address": 49152
+      },
+      "eq": "0a00000a09",
+      "max": 900
+    },
+    {
+      "read": "aligned",
+      "memory_type": "gameboyMemory",
+      "address": 49152,
+      "length": 5
+    },
+    {
+      "shot": "aligned"
+    },
+    {
+      "tap": [
+        "right"
+      ],
+      "press": 2,
+      "after": 2
+    },
+    {
+      "tap": [
+        "right"
+      ],
+      "press": 2,
+      "after": 2
+    },
+    {
+      "tap": [
+        "down"
+      ],
+      "press": 2,
+      "after": 2
+    },
+    {
+      "read": "moved",
+      "memory_type": "gameboyMemory",
+      "address": 49152,
+      "length": 5
+    },
+    {
+      "tap": [
+        "left"
+      ],
+      "press": 2,
+      "after": 2
+    },
+    {
+      "tap": [
+        "up"
+      ],
+      "press": 2,
+      "after": 2
+    },
+    {
+      "tap": [
+        "up"
+      ],
+      "press": 2,
+      "after": 2
+    },
+    {
+      "read": "moved2",
+      "memory_type": "gameboyMemory",
+      "address": 49152,
+      "length": 5
+    },
+    {
+      "tap": [
+        "a"
+      ],
+      "press": 2,
+      "after": 2
+    },
+    {
+      "read": "inverted",
+      "memory_type": "gameboyMemory",
+      "address": 49152,
+      "length": 5
+    },
+    {
+      "shot": "inverted"
+    }
   ]
 }

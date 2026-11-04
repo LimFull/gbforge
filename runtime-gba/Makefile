@@ -4,7 +4,7 @@ BIN    := $(DEVKITARM)/bin/arm-none-eabi-
 TONC   := $(DEVKITPRO)/libtonc
 RT     := $(abspath .)
 OBJDIR := $(OUT).obj
-CFLAGS := -mthumb -mcpu=arm7tdmi -O2 -Wall -Wno-unused-label -ffunction-sections -I$(RT) -I$(TONC)/include
+CFLAGS := -mthumb -mcpu=arm7tdmi -O2 -g -Wall -Wno-unused-label -ffunction-sections -I$(RT) -I$(TONC)/include $(EXTRA_CFLAGS)
 OBJS   := $(patsubst %.c,$(OBJDIR)/%.o,$(notdir $(RT)/gb.c $(wildcard $(GEN)/*.c))) $(OBJDIR)/rom.o
 
 vpath %.c $(RT) $(GEN)

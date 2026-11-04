@@ -2,9 +2,9 @@
 //
 // One C function per analyzed GB function: void f_BB_AAAA(uint16_t at). `at` selects the entry
 // (primary or a secondary entry such as a call return site or a jump target inside the function).
-// Intra-function branches are gotos; cross-function branches are tail calls; CALL pushes the
+// Intra-function branches are gotos; cross-function branches are trampoline jumps; CALL pushes the
 // GB return address, calls, and continues only if gb.ret matches (see gb.h).
-// No interpreter: unknown targets go through gb_dispatch, which traps if no compiled entry exists.
+// No interpreter: unknown targets go through gb_lookup, which traps if no compiled entry exists.
 #include "core.h"
 
 #include <cstdio>
@@ -20,6 +20,7 @@ namespace fs = std::filesystem;
 namespace {
 
 uint32_t key(BankId b, uint16_t a) { return (uint32_t(b) << 16) | a; }
+constexpr uint32_t NO_KEY = UINT32_MAX;
 BankId kbank(uint32_t k) { return k >> 16; }
 uint16_t kaddr(uint32_t k) { return k & 0xFFFF; }
 
@@ -102,22 +103,50 @@ struct Gen {
     }
 
     // Every instruction's static targets and return sites must be enterable.
+    // C functions are connected components of blocks joined by jumps and fallthrough (not
+    // calls), so loops always stay inside one function as gotos even when the analyzer (or a
+    // CDL entry point) split them into several GB "functions". Each block is emitted once.
     void collect()
     {
-        for (auto& [fk, f] : r.functions) {
-            std::set<uint32_t> s;
-            for (uint16_t a : f.block_addresses)
-                if (r.blocks.count(key(f.bank, a))) s.insert(key(f.bank, a));
-            if (!s.count(fk)) continue;  // a function must contain its entry block
-            auto& ins = fn_insns[fk];
-            for (uint32_t bk : s)
-                for (size_t idx : r.blocks.at(bk).instruction_indices)
-                    ins.insert(key(r.instructions[idx].bank, r.instructions[idx].address));
-            fn_blocks[fk] = std::move(s);
+        std::map<uint32_t, uint32_t> insn_block, parent;  // instruction → block; union-find
+        for (auto& [bk, b] : r.blocks) {
+            if (b.instruction_indices.empty()) continue;  // never a component root
+            parent[bk] = bk;
+            for (size_t idx : b.instruction_indices)
+                insn_block.emplace(key(r.instructions[idx].bank, r.instructions[idx].address), bk);
         }
+        auto find = [&](uint32_t x) {
+            while (parent[x] != x) x = parent[x] = parent[parent[x]];
+            return x;
+        };
+        auto join = [&](uint32_t bk, uint32_t target) {
+            auto it = insn_block.find(target);
+            if (it == insn_block.end()) return;
+            uint32_t x = find(bk), y = find(it->second);
+            if (x != y) parent[std::max(x, y)] = std::min(x, y);  // root = lowest block
+        };
+        for (auto& [bk, b] : r.blocks) {
+            if (b.instruction_indices.empty()) continue;
+            const Instruction& in = r.instructions[b.instruction_indices.back()];
+            uint16_t next = in.address + in.length;
+            if (!ends_flow(in)) join(bk, key(in.bank, next));
+            if (in.type == InstructionType::JR_N || in.type == InstructionType::JR_CC_N)
+                join(bk, key(in.bank, uint16_t(next + in.offset)));
+            if ((in.type == InstructionType::JP_NN || in.type == InstructionType::JP_CC_NN) &&
+                target_bank(in, in.imm16) == in.bank)
+                join(bk, key(in.bank, in.imm16));
+        }
+        for (auto& [bk, b] : r.blocks) {
+            if (b.instruction_indices.empty()) continue;
+            uint32_t root = find(bk);
+            fn_blocks[root].insert(bk);
+            for (size_t idx : b.instruction_indices)
+                fn_insns[root].insert(key(r.instructions[idx].bank, r.instructions[idx].address));
+        }
+
         needed.insert(key(0, r.entry_point));
         for (uint16_t v : {0x40, 0x48, 0x50, 0x58, 0x60}) needed.insert(key(0, v));
-        for (auto* set : {&r.computed_jump_targets, &r.branch_entry_targets, &r.synthetic_entry_targets})
+        for (auto* set : {&r.call_targets, &r.computed_jump_targets, &r.branch_entry_targets, &r.synthetic_entry_targets})
             needed.insert(set->begin(), set->end());
         for (auto& [bk, b] : r.blocks) {
             for (size_t idx : b.instruction_indices) {
@@ -138,19 +167,23 @@ struct Gen {
                     break;
                 default: break;
                 }
-                if (in.is_call || in.type == InstructionType::HALT) needed.insert(key(in.bank, next));
-                if (in.type == InstructionType::JR_N || in.type == InstructionType::JR_CC_N) {
-                    uint16_t t = next + in.offset;
-                    if (t <= in.address) needed.insert(key(in.bank, t));  // safepoint resume
-                }
+                if (in.is_call || in.type == InstructionType::HALT || in.type == InstructionType::EI)
+                    needed.insert(key(in.bank, next));  // return sites and interrupt resume points
             }
         }
-        for (auto& [fk, blocks] : fn_blocks) owner.emplace(fk, fk);
+        for (auto& [root, blocks] : fn_blocks) owner.emplace(root, root);
         for (uint32_t k : needed) {
             if (owner.count(k)) continue;
-            for (auto& [fk, ins] : fn_insns)
-                if (ins.count(k)) { owner[k] = fk; entries[fk].insert(k); break; }
+            auto it = insn_block.find(k);
+            if (it == insn_block.end()) continue;
+            uint32_t root = find(it->second);
+            owner[k] = root;
+            entries[root].insert(k);
         }
+        size_t biggest = 0;
+        for (auto& [root, ins] : fn_insns) biggest = std::max(biggest, ins.size());
+        stats["c_functions"] = fn_blocks.size();
+        stats["largest_c_function_instructions"] = biggest;
     }
 
     // Branch to k: goto inside this function, else tail-call the owner, else dynamic dispatch.
@@ -160,10 +193,10 @@ struct Gen {
         if (fn_insns[cur].count(k)) { labels.insert(k); return "{ " + sp + "goto " + label(kaddr(k)) + "; }"; }
         auto it = owner.find(k);
         std::string a = hex4(kaddr(k));
-        if (it != owner.end()) return "{ " + sp + "GB_JUMP(" + a + ", " + fn_name(it->second) + "(" + a + ")); }";
+        if (it != owner.end()) return "{ " + sp + "GB_JUMP(" + a + ", " + fn_name(it->second) + "); }";
         stats["dynamic_no_entry"]++;
         unresolved.push_back(fmt_addr(k) + " no compiled entry");
-        return "{ " + sp + "GB_JUMP(" + a + ", gb_dispatch(" + a + ")); }";
+        return "{ " + sp + "GB_JUMP(" + a + ", gb_lookup(" + a + ")); }";
     }
 
     std::string invoke(uint32_t k)
@@ -172,7 +205,7 @@ struct Gen {
         if (it != owner.end()) return fn_name(it->second) + "(" + hex4(kaddr(k)) + ")";
         stats["dynamic_no_entry"]++;
         unresolved.push_back(fmt_addr(k) + " no compiled entry");
-        return "gb_dispatch(" + hex4(kaddr(k)) + ")";
+        return "gb_lookup(" + hex4(kaddr(k)) + ")(" + hex4(kaddr(k)) + ")";
     }
 
     // Static target with runtime bank guard for bank-0 code calling into 0x4000-0x7FFF.
@@ -183,14 +216,14 @@ struct Gen {
         std::string body;
         if (tb == UNKNOWN_BANK) {
             stats["dynamic_bank"]++;
-            body = is_call ? "gb_dispatch(" + hex4(t) + ")" : "GB_JUMP(" + hex4(t) + ", gb_dispatch(" + hex4(t) + "));";
+            body = is_call ? "gb_lookup(" + hex4(t) + ")(" + hex4(t) + ")" : "GB_JUMP(" + hex4(t) + ", gb_lookup(" + hex4(t) + "));";
         } else if (in.bank == 0 && t >= 0x4000) {
             stats["guarded_bank"]++;
             std::string direct = is_call ? invoke(key(tb, t)) : jump(key(tb, t), in.address, false);
             if (is_call) {
-                body = "if (gb.rom_bank == " + std::to_string(tb) + ") " + direct + "; else gb_dispatch(" + hex4(t) + ")";
+                body = "if (gb.rom_bank == " + std::to_string(tb) + ") " + direct + "; else gb_lookup(" + hex4(t) + ")(" + hex4(t) + ")";
             } else {
-                body = "{ if (gb.rom_bank == " + std::to_string(tb) + ") " + direct + " GB_JUMP(" + hex4(t) + ", gb_dispatch(" + hex4(t) + ")); }";
+                body = "{ if (gb.rom_bank == " + std::to_string(tb) + ") " + direct + " GB_JUMP(" + hex4(t) + ", gb_lookup(" + hex4(t) + ")); }";
             }
         } else {
             body = is_call ? invoke(key(tb, t)) : jump(key(tb, t), in.address, true);
@@ -199,11 +232,61 @@ struct Gen {
         return "GB_CALL(" + hex4(next) + ", " + body + ");";
     }
 
-    std::string emit(const Instruction& in)
+    // Extra cycles when a conditional branch is taken (base cycles are added before the test).
+    static std::string taken(const Instruction& in)
+    {
+        int extra = int(in.cycles_branch) - int(in.cycles);
+        return extra > 0 ? "gb.cyc += " + std::to_string(extra) + "; " : "";
+    }
+
+    // Flags each instruction writes / reads (FZ FN FH FC as in gb.h). Control flow and anything
+    // that can reach an interrupt handler reads all of them.
+    enum { FZ = 1, FN = 2, FH = 4, FC = 8, FALL = 15 };
+
+    static unsigned flag_writes(const Instruction& in)
+    {
+        using T = InstructionType;
+        switch (in.type) {
+        case T::ADD_A_R: case T::ADD_A_N: case T::ADD_A_HL: case T::ADC_A_R: case T::ADC_A_N: case T::ADC_A_HL:
+        case T::SUB_A_R: case T::SUB_A_N: case T::SUB_A_HL: case T::SBC_A_R: case T::SBC_A_N: case T::SBC_A_HL:
+        case T::AND_A_R: case T::AND_A_N: case T::AND_A_HL: case T::OR_A_R: case T::OR_A_N: case T::OR_A_HL:
+        case T::XOR_A_R: case T::XOR_A_N: case T::XOR_A_HL: case T::CP_A_R: case T::CP_A_N: case T::CP_A_HL:
+        case T::ADD_SP_N: case T::LD_HL_SP_N: case T::RLCA: case T::RRCA: case T::RLA: case T::RRA:
+        case T::RLC_R: case T::RLC_HL: case T::RRC_R: case T::RRC_HL: case T::RL_R: case T::RL_HL:
+        case T::RR_R: case T::RR_HL: case T::SLA_R: case T::SLA_HL: case T::SRA_R: case T::SRA_HL:
+        case T::SWAP_R: case T::SWAP_HL: case T::SRL_R: case T::SRL_HL:
+            return FALL;
+        case T::INC_R: case T::DEC_R: case T::INC_HL_IND: case T::DEC_HL_IND: case T::BIT_N_R: case T::BIT_N_HL:
+            return FZ | FN | FH;
+        case T::ADD_HL_RR: case T::SCF: case T::CCF: return FN | FH | FC;
+        case T::DAA: return FZ | FH | FC;
+        case T::CPL: return FN | FH;
+        case T::POP: return in.reg16 == Reg16::AF ? FALL : 0;
+        default: return 0;
+        }
+    }
+
+    static unsigned flag_reads(const Instruction& in)
+    {
+        using T = InstructionType;
+        if (observes_time(in) || ends_flow(in)) return FALL;
+        switch (in.type) {
+        case T::ADC_A_R: case T::ADC_A_N: case T::ADC_A_HL: case T::SBC_A_R: case T::SBC_A_N: case T::SBC_A_HL:
+        case T::RLA: case T::RRA: case T::RL_R: case T::RL_HL: case T::RR_R: case T::RR_HL: case T::CCF:
+            return FC;
+        case T::DAA: return FN | FH | FC;
+        case T::PUSH: return in.reg16 == Reg16::AF ? FALL : 0;
+        default: return 0;
+        }
+    }
+
+    std::string emit(const Instruction& in, unsigned fm)
     {
         using T = InstructionType;
         uint16_t next = in.address + in.length;
-        auto hl_rmw = [](const std::string& f) { return "{ uint16_t a_ = HL(); wr8(a_, " + f + "(rd8(a_))); }"; };
+        std::string M = std::to_string(fm);
+        auto hl_rmw = [&](const std::string& f) { return "{ uint16_t a_ = HL(); wr8(a_, " + f + "(rd8(a_), " + M + ")); }"; };
+        auto flag = [&](unsigned bit, const char* stmt) { return (fm & bit) ? std::string(stmt) : std::string(); };
         std::string imm = std::to_string(in.imm8);
         switch (in.type) {
         case T::NOP: return "";
@@ -229,71 +312,71 @@ struct Gen {
         case T::LD_RR_NN: return set16(in.reg16, hex4(in.imm16));
         case T::LD_SP_HL: return "gb.sp = HL();";
         case T::LD_NN_SP: return "wr8(" + hex4(in.imm16) + ", gb.sp); wr8(" + hex4(in.imm16 + 1) + ", gb.sp >> 8);";
-        case T::LD_HL_SP_N: return "SET_HL(alu_sp_offset(" + std::to_string(in.offset) + "));";
+        case T::LD_HL_SP_N: return "SET_HL(alu_sp_offset(" + std::to_string(in.offset) + ", " + M + "));";
         case T::PUSH: return "push16(" + get16(in.reg16) + ");";
         case T::POP: return set16(in.reg16, "pop16()");
-        case T::ADD_A_R: return "alu_add(" + std::string(r8(in.reg8_src)) + ", 0);";
-        case T::ADD_A_N: return "alu_add(" + imm + ", 0);";
-        case T::ADD_A_HL: return "alu_add(rd8(HL()), 0);";
-        case T::ADC_A_R: return "alu_add(" + std::string(r8(in.reg8_src)) + ", gb.cf);";
-        case T::ADC_A_N: return "alu_add(" + imm + ", gb.cf);";
-        case T::ADC_A_HL: return "alu_add(rd8(HL()), gb.cf);";
-        case T::SUB_A_R: return "gb.a = alu_sub(" + std::string(r8(in.reg8_src)) + ", 0);";
-        case T::SUB_A_N: return "gb.a = alu_sub(" + imm + ", 0);";
-        case T::SUB_A_HL: return "gb.a = alu_sub(rd8(HL()), 0);";
-        case T::SBC_A_R: return "gb.a = alu_sub(" + std::string(r8(in.reg8_src)) + ", gb.cf);";
-        case T::SBC_A_N: return "gb.a = alu_sub(" + imm + ", gb.cf);";
-        case T::SBC_A_HL: return "gb.a = alu_sub(rd8(HL()), gb.cf);";
-        case T::AND_A_R: return "alu_and(" + std::string(r8(in.reg8_src)) + ");";
-        case T::AND_A_N: return "alu_and(" + imm + ");";
-        case T::AND_A_HL: return "alu_and(rd8(HL()));";
-        case T::OR_A_R: return "alu_or(" + std::string(r8(in.reg8_src)) + ");";
-        case T::OR_A_N: return "alu_or(" + imm + ");";
-        case T::OR_A_HL: return "alu_or(rd8(HL()));";
-        case T::XOR_A_R: return "alu_xor(" + std::string(r8(in.reg8_src)) + ");";
-        case T::XOR_A_N: return "alu_xor(" + imm + ");";
-        case T::XOR_A_HL: return "alu_xor(rd8(HL()));";
-        case T::CP_A_R: return "alu_sub(" + std::string(r8(in.reg8_src)) + ", 0);";
-        case T::CP_A_N: return "alu_sub(" + imm + ", 0);";
-        case T::CP_A_HL: return "alu_sub(rd8(HL()), 0);";
-        case T::INC_R: return set8(in.reg8_dst, "alu_inc(" + std::string(r8(in.reg8_dst)) + ")");
-        case T::DEC_R: return set8(in.reg8_dst, "alu_dec(" + std::string(r8(in.reg8_dst)) + ")");
+        case T::ADD_A_R: return "alu_add(" + std::string(r8(in.reg8_src)) + ", 0, " + M + ");";
+        case T::ADD_A_N: return "alu_add(" + imm + ", 0, " + M + ");";
+        case T::ADD_A_HL: return "alu_add(rd8(HL()), 0, " + M + ");";
+        case T::ADC_A_R: return "alu_add(" + std::string(r8(in.reg8_src)) + ", gb.cf, " + M + ");";
+        case T::ADC_A_N: return "alu_add(" + imm + ", gb.cf, " + M + ");";
+        case T::ADC_A_HL: return "alu_add(rd8(HL()), gb.cf, " + M + ");";
+        case T::SUB_A_R: return "gb.a = alu_sub(" + std::string(r8(in.reg8_src)) + ", 0, " + M + ");";
+        case T::SUB_A_N: return "gb.a = alu_sub(" + imm + ", 0, " + M + ");";
+        case T::SUB_A_HL: return "gb.a = alu_sub(rd8(HL()), 0, " + M + ");";
+        case T::SBC_A_R: return "gb.a = alu_sub(" + std::string(r8(in.reg8_src)) + ", gb.cf, " + M + ");";
+        case T::SBC_A_N: return "gb.a = alu_sub(" + imm + ", gb.cf, " + M + ");";
+        case T::SBC_A_HL: return "gb.a = alu_sub(rd8(HL()), gb.cf, " + M + ");";
+        case T::AND_A_R: return "alu_and(" + std::string(r8(in.reg8_src)) + ", " + M + ");";
+        case T::AND_A_N: return "alu_and(" + imm + ", " + M + ");";
+        case T::AND_A_HL: return "alu_and(rd8(HL()), " + M + ");";
+        case T::OR_A_R: return "alu_or(" + std::string(r8(in.reg8_src)) + ", " + M + ");";
+        case T::OR_A_N: return "alu_or(" + imm + ", " + M + ");";
+        case T::OR_A_HL: return "alu_or(rd8(HL()), " + M + ");";
+        case T::XOR_A_R: return "alu_xor(" + std::string(r8(in.reg8_src)) + ", " + M + ");";
+        case T::XOR_A_N: return "alu_xor(" + imm + ", " + M + ");";
+        case T::XOR_A_HL: return "alu_xor(rd8(HL()), " + M + ");";
+        case T::CP_A_R: return "alu_sub(" + std::string(r8(in.reg8_src)) + ", 0, " + M + ");";
+        case T::CP_A_N: return "alu_sub(" + imm + ", 0, " + M + ");";
+        case T::CP_A_HL: return "alu_sub(rd8(HL()), 0, " + M + ");";
+        case T::INC_R: return set8(in.reg8_dst, "alu_inc(" + std::string(r8(in.reg8_dst)) + ", " + M + ")");
+        case T::DEC_R: return set8(in.reg8_dst, "alu_dec(" + std::string(r8(in.reg8_dst)) + ", " + M + ")");
         case T::INC_HL_IND: return hl_rmw("alu_inc");
         case T::DEC_HL_IND: return hl_rmw("alu_dec");
-        case T::ADD_HL_RR: return "alu_add_hl(" + get16(in.reg16) + ");";
-        case T::ADD_SP_N: return "gb.sp = alu_sp_offset(" + std::to_string(in.offset) + ");";
+        case T::ADD_HL_RR: return "alu_add_hl(" + get16(in.reg16) + ", " + M + ");";
+        case T::ADD_SP_N: return "gb.sp = alu_sp_offset(" + std::to_string(in.offset) + ", " + M + ");";
         case T::INC_RR: return set16(in.reg16, get16(in.reg16) + " + 1");
         case T::DEC_RR: return set16(in.reg16, get16(in.reg16) + " - 1");
-        case T::RLCA: return "a_rot(cb_rlc(gb.a));";
-        case T::RRCA: return "a_rot(cb_rrc(gb.a));";
-        case T::RLA: return "a_rot(cb_rl(gb.a));";
-        case T::RRA: return "a_rot(cb_rr(gb.a));";
-#define CB(OP, f) case T::OP##_R: return set8(in.reg8_dst, std::string(f "(") + r8(in.reg8_dst) + ")"); \
+        case T::RLCA: return "a_rot(cb_rlc(gb.a, " + M + "), " + M + ");";
+        case T::RRCA: return "a_rot(cb_rrc(gb.a, " + M + "), " + M + ");";
+        case T::RLA: return "a_rot(cb_rl(gb.a, " + M + "), " + M + ");";
+        case T::RRA: return "a_rot(cb_rr(gb.a, " + M + "), " + M + ");";
+#define CB(OP, f) case T::OP##_R: return set8(in.reg8_dst, std::string(f "(") + r8(in.reg8_dst) + ", " + M + ")"); \
                   case T::OP##_HL: return hl_rmw(f);
         CB(RLC, "cb_rlc") CB(RRC, "cb_rrc") CB(RL, "cb_rl") CB(RR, "cb_rr")
         CB(SLA, "cb_sla") CB(SRA, "cb_sra") CB(SWAP, "cb_swap") CB(SRL, "cb_srl")
 #undef CB
-        case T::BIT_N_R: return "cb_bit(" + std::to_string(in.bit_index) + ", " + r8(in.reg8_dst) + ");";
-        case T::BIT_N_HL: return "cb_bit(" + std::to_string(in.bit_index) + ", rd8(HL()));";
+        case T::BIT_N_R: return "cb_bit(" + std::to_string(in.bit_index) + ", " + r8(in.reg8_dst) + ", " + M + ");";
+        case T::BIT_N_HL: return "cb_bit(" + std::to_string(in.bit_index) + ", rd8(HL()), " + M + ");";
         case T::SET_N_R: return std::string(r8(in.reg8_dst)) + " |= " + std::to_string(1 << in.bit_index) + ";";
         case T::RES_N_R: return std::string(r8(in.reg8_dst)) + " &= " + std::to_string(uint8_t(~(1 << in.bit_index))) + ";";
         case T::SET_N_HL: return "{ uint16_t a_ = HL(); wr8(a_, rd8(a_) | " + std::to_string(1 << in.bit_index) + "); }";
         case T::RES_N_HL: return "{ uint16_t a_ = HL(); wr8(a_, rd8(a_) & " + std::to_string(uint8_t(~(1 << in.bit_index))) + "); }";
-        case T::CCF: return "gb.cf ^= 1; gb.nf = gb.hf = 0;";
-        case T::SCF: return "gb.cf = 1; gb.nf = gb.hf = 0;";
-        case T::DAA: return "alu_daa();";
-        case T::CPL: return "gb.a = ~gb.a; gb.nf = gb.hf = 1;";
+        case T::CCF: return flag(FC, "gb.cf ^= 1; ") + flag(FN, "gb.nf = 0; ") + flag(FH, "gb.hf = 0;");
+        case T::SCF: return flag(FC, "gb.cf = 1; ") + flag(FN, "gb.nf = 0; ") + flag(FH, "gb.hf = 0;");
+        case T::DAA: return "alu_daa(" + M + ");";
+        case T::CPL: return "gb.a = ~gb.a; " + flag(FN, "gb.nf = 1; ") + flag(FH, "gb.hf = 1;");
         case T::DI: return "gb_di();";
-        case T::EI: return "gb_ei();";
+        case T::EI: return "gb_ei(); GB_SAFEPOINT(" + hex4(next) + ");";
         case T::HALT: return "if (gb_halt(" + hex4(next) + ")) return;";
         case T::STOP: return "gb_stop(" + hex4(next) + ");";
         case T::JP_NN: return branch(in, in.imm16, false);
-        case T::JP_CC_NN: return "if (" + std::string(cond(in.condition)) + ") " + branch(in, in.imm16, false);
+        case T::JP_CC_NN: return "if (" + std::string(cond(in.condition)) + ") { " + taken(in) + branch(in, in.imm16, false) + " }";
         case T::JR_N: return jump(key(in.bank, uint16_t(next + in.offset)), in.address, true);
-        case T::JR_CC_N: return "if (" + std::string(cond(in.condition)) + ") " + jump(key(in.bank, uint16_t(next + in.offset)), in.address, true);
-        case T::JP_HL: stats["jp_hl"]++; return "{ uint16_t t_ = HL(); GB_JUMP(t_, gb_dispatch(t_)); }";
+        case T::JR_CC_N: return "if (" + std::string(cond(in.condition)) + ") { " + taken(in) + jump(key(in.bank, uint16_t(next + in.offset)), in.address, true) + " }";
+        case T::JP_HL: stats["jp_hl"]++; return "{ uint16_t t_ = HL(); GB_JUMP(t_, gb_lookup(t_)); }";
         case T::CALL_NN: return branch(in, in.imm16, true);
-        case T::CALL_CC_NN: return "if (" + std::string(cond(in.condition)) + ") { " + branch(in, in.imm16, true) + " }";
+        case T::CALL_CC_NN: return "if (" + std::string(cond(in.condition)) + ") { " + taken(in) + branch(in, in.imm16, true) + " }";
         case T::RST:
             if (rst_padding(in.rst_vector)) {
                 stats["rst_padding_trap"]++;
@@ -301,11 +384,23 @@ struct Gen {
             }
             return "GB_CALL(" + hex4(next) + ", " + invoke(key(0, in.rst_vector)) + ");";
         case T::RET: return "{ gb.ret = pop16(); return; }";
-        case T::RET_CC: return "if (" + std::string(cond(in.condition)) + ") { gb.ret = pop16(); return; }";
+        case T::RET_CC: return "if (" + std::string(cond(in.condition)) + ") { " + taken(in) + "gb.ret = pop16(); return; }";
         case T::RETI: return "{ gb.ret = pop16(); gb_ei(); return; }";
         default:
             stats["undefined"]++;
             return "gb_trap(" + std::to_string(in.bank) + ", " + hex4(in.address) + ", TRAP_UNDEFINED);";
+        }
+    }
+
+    // Instructions after which GB time must be exact: control flow, interrupts, constant IO.
+    static bool observes_time(const Instruction& in)
+    {
+        using T = InstructionType;
+        switch (in.type) {
+        case T::LDH_A_N: case T::LDH_N_A: return in.imm8 < 0x80 || in.imm8 == 0xFF;
+        case T::LD_A_NN: case T::LD_NN_A: return in.imm16 >= 0xFF00 && (in.imm16 < 0xFF80 || in.imm16 == 0xFFFF);
+        case T::LDH_A_C: case T::LDH_C_A: case T::HALT: case T::STOP: case T::EI: case T::DI: return true;
+        default: return in.is_jump || in.is_call || in.is_return || in.type == T::JP_HL || in.type == T::RST;
         }
     }
 
@@ -325,24 +420,57 @@ struct Gen {
         labels = entries[fk];
         labels.insert(fk);
         const auto& blocks = fn_blocks[fk];
+        // Cycles are summed over straight-line runs and added to gb.cyc only where GB time is
+        // observable: before control flow and IO, and before any point control can enter.
+        std::set<uint32_t> enter(entries[fk].begin(), entries[fk].end());
+        enter.insert(blocks.begin(), blocks.end());
+        for (auto bk : blocks)
+            for (size_t idx : r.blocks.at(bk).instruction_indices) {
+                const Instruction& in = r.instructions[idx];
+                uint16_t next = in.address + in.length;
+                if (in.type == InstructionType::JR_N || in.type == InstructionType::JR_CC_N)
+                    enter.insert(key(in.bank, uint16_t(next + in.offset)));
+                if (in.type == InstructionType::JP_NN || in.type == InstructionType::JP_CC_NN)
+                    enter.insert(key(in.bank, in.imm16));
+            }
+        unsigned pending = 0;
+        auto flush = [&](unsigned extra) {
+            unsigned n = pending + extra;
+            pending = 0;
+            return n ? "gb.cyc += " + std::to_string(n) + "; " : std::string();
+        };
         // body first: jump() records which labels are referenced
-        std::vector<std::pair<uint32_t, std::string>> lines;  // (instruction key or 0, text)
+        std::vector<std::pair<uint32_t, std::string>> lines;  // (instruction key or NO_KEY, text)
         for (auto it = blocks.begin(); it != blocks.end(); ++it) {
             const BasicBlock& b = r.blocks.at(*it);
             const Instruction* last = nullptr;
+            // flag liveness, backwards over the block; everything is live at its end
+            std::vector<unsigned> live_after(b.instruction_indices.size());
+            unsigned live = FALL;
+            for (size_t i = b.instruction_indices.size(); i-- > 0;) {
+                const Instruction& in = r.instructions[b.instruction_indices[i]];
+                live_after[i] = live;
+                live = (live & ~flag_writes(in)) | flag_reads(in);
+            }
+            size_t pos = 0;
             for (size_t idx : b.instruction_indices) {
                 const Instruction& in = r.instructions[idx];
+                uint32_t k = key(in.bank, in.address);
                 stats["instructions"]++;
-                std::string code = emit(in);
-                lines.emplace_back(key(in.bank, in.address), "    /* " + fmt_addr(in.bank, in.address) + " " +
-                                   in.disassemble() + " */" + (code.empty() ? "" : " " + code));
+                if (enter.count(k) && pending) lines.emplace_back(NO_KEY, "    " + flush(0));
+                unsigned fm = flag_writes(in) & live_after[pos++];
+                if (fm != flag_writes(in)) stats["dead_flag_writes_elided"]++;
+                std::string code = emit(in, fm);
+                if (observes_time(in)) code = flush(in.cycles) + code;
+                else pending += in.cycles;
+                lines.emplace_back(k, "    /* " + fmt_addr(in.bank, in.address) + " " + in.disassemble() + " */ " + code);
                 last = &in;
             }
             if (!last || ends_flow(*last)) continue;
             uint32_t fall = key(last->bank, last->address + last->length);
             auto nx = std::next(it);
             if (nx != blocks.end() && *nx == fall) continue;
-            lines.emplace_back(0, "    " + jump(fall, last->address, false));
+            lines.emplace_back(NO_KEY, "    " + flush(0) + jump(fall, last->address, false));
         }
         o << "void " << fn_name(fk) << "(uint16_t at)\n{\n";
         auto& extra = entries[fk];
@@ -355,7 +483,7 @@ struct Gen {
         }
         std::set<uint32_t> placed;
         for (auto& [k, text] : lines) {
-            if (k && labels.count(k) && placed.insert(k).second) o << label(kaddr(k)) << ":\n";
+            if (k != NO_KEY && labels.count(k) && placed.insert(k).second) o << label(kaddr(k)) << ":\n";
             o << text << "\n";
         }
         o << "}\n\n";
@@ -403,12 +531,13 @@ int codegen(const ROM& rom, const AnalysisResult& r, const std::string& outdir)
         std::fprintf(stderr, "error: no function at entry point %04X\n", r.entry_point);
         return 3;
     }
-    t << "void gb_entry(void)\n{\n    " << fn_name(entry->second) << "(" << hex4(r.entry_point)
-      << ");\n    for (;;) gb_dispatch(gb.ret);\n}\n";
+    t << "void gb_entry(void)\n{\n    gb.jfn = " << fn_name(entry->second) << ";\n    gb.jat = " << hex4(r.entry_point)
+      << ";\n    for (;;) {\n        if (!gb.jfn) { gb.jat = gb.ret; gb.jfn = gb_lookup(gb.ret); }  // RET unwound to the top\n"
+         "        GbFn f = gb.jfn;\n        gb.jfn = 0;\n        f(gb.jat);\n    }\n}\n";
 
     std::ofstream j(fs::path(outdir) / "codegen.json");
     j << "{\n  \"schema\": \"gbforge.codegen\",\n  \"schema_version\": 1,\n";
-    j << "  \"rom_banks\": " << rom.bank_count() << ",\n  \"functions\": " << r.functions.size()
+    j << "  \"rom_banks\": " << rom.bank_count() << ",\n  \"functions\": " << g.fn_blocks.size()
       << ",\n  \"entries\": " << n << ",\n  \"analysis_unresolved_edges\": " << count_unresolved(r) << ",\n  \"stats\": {";
     bool first = true;
     for (auto& [k, v] : g.stats) { j << (first ? "" : ", ") << json_str(k) << ": " << v; first = false; }

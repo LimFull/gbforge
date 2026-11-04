@@ -1,7 +1,11 @@
 // gbforge-core — host tool on top of gb-recompiled's analyzer (gbrecomp_core).
 //
-//   gbforge-core analyze ROM OUT.json [--entry BB:AAAA]... [--trace FILE] [--no-scan]
-//   gbforge-core codegen ROM OUTDIR   [--entry BB:AAAA]... [--trace FILE] [--no-scan]
+//   gbforge-core analyze ROM OUT.json [--entry BB:AAAA]... [--trace FILE] [--cdl FILE] [--no-scan]
+//   gbforge-core codegen ROM OUTDIR   [--entry BB:AAAA]... [--trace FILE] [--cdl FILE] [--no-scan]
+//
+// --cdl: Mesen Code/Data Logger flags for PRG ROM (scripts/mesen_cdl.py). Executed jump targets
+// and sub entries become entry points; bytes only ever read as data become data annotations.
+// This is coverage evidence from a real run, never a resolution of an unresolved indirect edge.
 //
 // Exit codes follow the gb2gba contract: 0 ok, 2 invalid ROM, 3 unresolved paths (codegen, strict).
 #include "core.h"
@@ -40,6 +44,31 @@ static bool parse_addr(const char* s, uint32_t& out) {
     unsigned bank, addr;
     if (std::sscanf(s, "%x:%x", &bank, &addr) != 2 || bank > 0x1FF || addr > 0xFFFF) return false;
     out = (bank << 16) | addr;
+    return true;
+}
+
+static bool load_cdl(const char* path, const ROM& rom, AnalyzerOptions& opts)
+{
+    std::ifstream f(path, std::ios::binary);
+    std::vector<uint8_t> cdl((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (cdl.size() != rom.size()) {
+        std::fprintf(stderr, "error: CDL %s has %zu bytes, ROM has %zu\n", path, cdl.size(), rom.size());
+        return false;
+    }
+    auto full = [](size_t off) {
+        uint32_t bank = off / 0x4000;
+        return (bank << 16) | uint32_t(off % 0x4000 + (bank ? 0x4000 : 0));
+    };
+    enum { CODE = 1, DATA = 2, JUMP_TARGET = 4, SUB_ENTRY = 8 };
+    for (size_t i = 0; i < cdl.size(); i++) {
+        if (cdl[i] & (JUMP_TARGET | SUB_ENTRY)) opts.entry_points.push_back(full(i));
+        // ponytail: data-only in this run; a byte executed only in another run would be mis-annotated
+        if ((cdl[i] & (CODE | DATA)) == DATA && (i == 0 || (cdl[i - 1] & (CODE | DATA)) != DATA || i % 0x4000 == 0)) {
+            size_t j = i;
+            while (j < cdl.size() && (cdl[j] & (CODE | DATA)) == DATA && (j == i || j % 0x4000)) j++;
+            opts.annotations.push_back({full(i), uint32_t(j - i), AnalysisAnnotationKind::DATA});
+        }
+    }
     return true;
 }
 
@@ -124,11 +153,13 @@ int main(int argc, char** argv) {
         return 2;
     }
     AnalyzerOptions opts;
+    const char* cdl_path = nullptr;
     for (int i = 4; i < argc; i++) {
         uint32_t a;
         if (!std::strcmp(argv[i], "--entry") && i + 1 < argc && parse_addr(argv[i + 1], a)) { opts.entry_points.push_back(a); i++; }
         else if (!std::strcmp(argv[i], "--trace") && i + 1 < argc) opts.trace_file_path = argv[++i];
         else if (!std::strcmp(argv[i], "--no-scan")) opts.aggressive_scan = false;
+        else if (!std::strcmp(argv[i], "--cdl") && i + 1 < argc) cdl_path = argv[++i];
         else { std::fprintf(stderr, "unknown option: %s\n", argv[i]); return 2; }
     }
 
@@ -137,6 +168,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "error: cannot load ROM: %s\n", rom ? rom->error().c_str() : argv[2]);
         return 2;
     }
+    if (cdl_path && !load_cdl(cdl_path, *rom, opts)) return 2;
     // The analyzer logs progress to stdout; keep stdout for our own output only.
     std::streambuf* saved = std::cout.rdbuf(std::cerr.rdbuf());
     AnalysisResult result = analyze(*rom, opts);

@@ -1,0 +1,18 @@
+{
+  "description": "DQ1&2 (Japan, sha256 7cae9c90…438caf): zero cart RAM on both sides, align on the per-frame counter $C890, then title/menu input. Addresses are observed facts, not ROM content.",
+  "steps": [
+    {"write": {"memory_type": "gbCartRam", "address": 0, "fill": 0, "length": 8192}},
+    {"until": {"memory_type": "gameboyMemory", "address": 51344}, "eq": "40", "max": 1500},
+    {"read": "counters", "memory_type": "gameboyMemory", "address": 51344, "length": 1},
+    {"shot": "aligned"},
+    {"step": 240},
+    {"shot": "t240"},
+    {"tap": ["start"], "press": 2, "after": 120},
+    {"shot": "after-start"},
+    {"tap": ["a"], "press": 2, "after": 120},
+    {"shot": "after-a1"},
+    {"tap": ["a"], "press": 2, "after": 180},
+    {"shot": "after-a2"},
+    {"read": "wram-c800", "memory_type": "gameboyMemory", "address": 51200, "length": 256}
+  ]
+}
