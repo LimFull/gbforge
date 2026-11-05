@@ -95,10 +95,12 @@ def port_options(rom):
     mem = doc["memory"]
     return {"translate": gb_to_gba(doc),
             "gb_frames_addr": int(mem["gb_frames"], 16) if "gb_frames" in mem else None,
-            "trap_addr": int(mem["trap"], 16) if "trap" in mem else None}
+            "trap_addr": int(mem["trap"], 16) if "trap" in mem else None,
+            "pace": {k: int(v, 16) for k, v in mem["pace"].items()} if "pace" in mem else None}
 
 
-def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None, extra=None, trap_addr=None):
+def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None, extra=None, trap_addr=None,
+        pace=None):
     """Play the scenario; `extra(do)` (if given) may then execute more steps in the same session."""
     os.makedirs(outdir, exist_ok=True)
     result = {"rom": os.path.basename(rom),
@@ -136,6 +138,10 @@ def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None,
                                "after_frames": s.get("after", 1)})
             elif "until" in s and "eq" in s:
                 until_eq(m, translate(dict(s["until"], length=len(s["eq"]) // 2)), s["eq"], s.get("max", 1000))
+                if pace:  # count GB frames from this point, as the original steps whole frames from it
+                    rd = lambda a: int.from_bytes(bytes.fromhex(m.call("read_memory", {"memory_type": "gbaMemory", "address": a, "length": 4})["hex"]), "little")
+                    f = (rd(pace["cyc"]) - rd(pace["frame_start"])) % 70224
+                    m.call("write_memory", {"memory_type": "gbaMemory", "address": pace["pace_f"], "hex": f.to_bytes(4, "little").hex()})
             elif "until" in s:
                 spec = translate(dict(s["until"], length=1))
                 for _ in range(s.get("max", 1000)):

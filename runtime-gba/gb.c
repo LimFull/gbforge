@@ -177,8 +177,12 @@ static uint32_t frame_start;              // GB time of the current LCD frame's 
 static uint32_t pace_at;                  // next real-time sync point (LCD off)
 static uint32_t sync_frame;               // real-time frame the next GB frame may not precede
 volatile uint32_t gb_paced;               // GB frames so far, purely in GB time: scenarios count these
+// Frame position where a GB frame is counted and real time is synced (and so where an emucap frame
+// step stops). VBlank by default; a scenario sets it to its alignment point so the port stops at
+// the same GB time as the original, which steps whole frames from that point.
+volatile uint32_t gb_pace_f = 144 * 456 + 4;
 static uint32_t div_base, tima_at;        // DIV origin; next TIMA overflow
-static uint32_t vblank_line_done, lyc_done, hblank_line;  // per-frame event progress
+static uint32_t vblank_line_done, lyc_done, hblank_line, paced_done;  // per-frame event progress
 
 static const uint16_t tac_period[4] = {1024, 16, 64, 256};
 uint32_t gb_irq_ready;
@@ -197,7 +201,7 @@ static void raise_irq(unsigned bit, uint32_t at)
 static uint32_t lcd_pos(void)             // cycles into the current LCD frame
 {
     uint32_t f = gb.cyc - frame_start;
-    while (f >= FRAME) { frame_start += FRAME; f -= FRAME; vblank_line_done = lyc_done = 0; hblank_line = 0; }
+    while (f >= FRAME) { frame_start += FRAME; f -= FRAME; vblank_line_done = lyc_done = paced_done = 0; hblank_line = 0; }
     return f;
 }
 
@@ -281,6 +285,7 @@ static void schedule(void)
         uint32_t t = base + FRAME;                                    // next frame start
         if (!vblank_line_done) t = base + 144 * LINE + LINE_IRQ_AT;
         if (t - now < next - now) next = t;
+        if (!paced_done && base + gb_pace_f - now < next - now) next = base + gb_pace_f;
         if ((io[0x41] & 0x40) && !lyc_done && io[0x45] < 154 && lyc_event(io[0x45]) >= f) {
             t = base + lyc_event(io[0x45]);
             if (t - now < next - now) next = t;
@@ -307,9 +312,12 @@ HOT static void run_events(void)
     if (LCDC & 0x80) {
         uint32_t f = lcd_pos();
         uint32_t base = now - f;
+        if (!paced_done && f >= gb_pace_f) {
+            paced_done = 1;
+            pace();
+        }
         if (!vblank_line_done && f >= 144 * LINE + LINE_IRQ_AT) {
             vblank_line_done = 1;
-            pace();
             raise_irq(0, base + 144 * LINE + LINE_IRQ_AT + VBLANK_IRQ_DELAY);
             if (io[0x41] & 0x10) raise_irq(1, base + 144 * LINE + LINE_IRQ_AT + VBLANK_IRQ_DELAY);
         }
@@ -533,7 +541,7 @@ HOT void gb_write_io(uint8_t r, uint8_t v)
         for (unsigned b = 0; b < 5; b++) if ((v & ~old) >> b & 1) if_at[b] = gb.cyc;
         IF = v & 0x1F; update_irq(); break;
     case 0x40:
-        if (!(old & 0x80) && (v & 0x80)) { frame_start = gb.cyc; vblank_line_done = lyc_done = hblank_line = 0; }
+        if (!(old & 0x80) && (v & 0x80)) { frame_start = gb.cyc; vblank_line_done = lyc_done = hblank_line = paced_done = 0; }
         if ((old & 0x80) && !(v & 0x80)) pace_at = gb.cyc + FRAME;
         ppu_lcdc(old);
         schedule();

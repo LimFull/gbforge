@@ -4,7 +4,7 @@
   gb2gba inspect ROM [--json]
   gb2gba analyze ROM --out DIR [--no-scan] [--entry BB:AAAA]... [--trace FILE] [--cdl FILE]
   gb2gba port ROM --output OUT.gba [--native-policy strict] [--no-scan] [--entry BB:AAAA]... [--cdl FILE]
-  gb2gba verify ROM PORT.gba --scenario SCENARIO.json --out DIR     (needs emucap, see local.env.example)
+  gb2gba verify ROM PORT.gba --scenario SCENARIO.json --out DIR [--reuse-original]   (needs emucap)
 
 Exit codes: 0 ok, 2 invalid ROM, 3 unresolved paths (strict), 5 over budget, 6 external tool error,
 8 port differs from the original.
@@ -241,6 +241,8 @@ def write_map(sym_path, map_path, header):
             "frames": f"0x{syms['gb_frames']:08X}",          # u32 GBA VBlanks, then u32 lag frames
             "lag_frames": f"0x{syms['gb_lag_frames']:08X}",
             "gb_frames": f"0x{syms['gb_paced']:08X}",       # u32 GB frames elapsed in GB time
+            "pace": {"cyc": f"0x{syms['gb'] + 28:08X}", "frame_start": f"0x{syms['frame_start']:08X}",
+                     "pace_f": f"0x{syms['gb_pace_f']:08X}"},  # where the GB frame count ticks
             **({"profile": {"pcs": f"0x{syms['gb_prof_pcs']:08X}", "count": f"0x{syms['gb_prof_count']:08X}", "size": 4096}}
                if "gb_prof_pcs" in syms else {}),
             # GB-visible windows. D000-DFFF matches only while SVBK selects bank 0/1 (CGB).
@@ -373,7 +375,12 @@ def cmd_verify(args):
     with open(args.scenario) as f:
         scenario = json.load(f)
     try:
-        orig = emucap_run.run(os.path.abspath(args.rom), scenario, os.path.join(args.out, "original"))
+        saved = os.path.join(args.out, "original", "result.json")
+        if args.reuse_original and os.path.exists(saved):  # the original is deterministic: iterate on the port only
+            with open(saved) as f:
+                orig = json.load(f)
+        else:
+            orig = emucap_run.run(os.path.abspath(args.rom), scenario, os.path.join(args.out, "original"))
         port = emucap_run.run(os.path.abspath(args.port), scenario, os.path.join(args.out, "port"),
                               **emucap_run.port_options(args.port))  # GB-time frames, GBA addresses
     except Exception as e:  # emucap/emulator failures are external-tool errors, not mismatches
@@ -410,6 +417,7 @@ def main(argv=None):
     v.add_argument("port")
     v.add_argument("--scenario", required=True)
     v.add_argument("--out", required=True)
+    v.add_argument("--reuse-original", action="store_true", help="reuse OUT/original/result.json from an earlier run")
     v.set_defaults(func=cmd_verify)
     for name, func in (("analyze", cmd_analyze), ("port", cmd_port)):
         c = sub.add_parser(name)
