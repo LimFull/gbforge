@@ -185,8 +185,8 @@ uint32_t gb_irq_ready;
 static uint32_t if_at[5];                 // GB time each IF bit was raised
 // Calibration knob: cycles from line 144 to the VBlank handler's first instruction beyond our
 // 20-cycle dispatch (the interrupted instruction finishing, IF latency). Measured against Mesen:
-// DQ1&2's handler writes C890 at line 4 dot 179 there, 43 cycles later than with 0.
-#define VBLANK_IRQ_DELAY 43
+// DQ1&2's handler writes C890 at line 4 dot 179 there (43 cycles after line 144 dot 0).
+#define VBLANK_IRQ_DELAY 39
 
 static void raise_irq(unsigned bit, uint32_t at)
 {
@@ -205,7 +205,34 @@ static uint32_t lcd_pos(void)             // cycles into the current LCD frame
 // __aeabi_uidiv; games poll STAT/LY in tight loops). Exact over the frame: 456 = 8 * 57.
 static inline uint32_t line_of(uint32_t f) { return ((f >> 3) * 9199) >> 19; }
 
-static uint8_t ppu_ly(void) { return (LCDC & 0x80) ? line_of(lcd_pos()) : 0; }
+// Dots within a line, Mesen's CGB timing: OAM search from dot 4, drawing from 84, HBlank from
+// HBLANK_AT (SCX=0, no sprites or window: measured 256..259); dots 0-3 keep the previous mode; LYC
+// compares from dot 4 and the VBlank IRQ comes at line 144 dot 4. Line 153 reads LY=0 from dot 6
+// and matches LYC=0 from dot 12. ponytail: drawing length ignores SCX, sprites and the window.
+#define MODE2_AT 4
+#define MODE3_AT 84
+#define HBLANK_AT 256
+#define LINE_IRQ_AT 4
+
+static uint32_t ly_at(uint32_t f)         // LY register for frame position f
+{
+    uint32_t line = line_of(f);
+    return line == 153 && f - 153 * LINE >= 6 ? 0 : line;
+}
+
+static int lyc_line(uint32_t f)           // the LY the LYC comparator sees, -1 between lines
+{
+    uint32_t line = line_of(f), x = f - line * LINE;
+    if (line == 153) return x < 6 ? -1 : x < 8 ? 153 : x < 12 ? -1 : 0;
+    return line && x < LINE_IRQ_AT ? -1 : (int)line;
+}
+
+static uint32_t lyc_event(uint8_t lyc)    // frame position where LY=LYC starts matching
+{
+    return lyc == 0 ? 153 * LINE + 12 : lyc == 153 ? 153 * LINE + 6 : lyc * LINE + LINE_IRQ_AT;
+}
+
+static uint8_t ppu_ly(void) { return (LCDC & 0x80) ? ly_at(lcd_pos()) : 0; }
 
 // Polling skip: reading LY or STAT again within 64 cycles and getting the same value means a
 // wait loop. Nothing it can observe changes before the next line / mode boundary, so GB time
@@ -227,7 +254,9 @@ static void skip_to_boundary(int mode_only)
 {
     uint32_t f = lcd_pos(), line = line_of(f), x = f - line * LINE;
     uint32_t to = LINE;                           // next line
-    if (mode_only && line < 144) to = x < 80 ? 80 : x < 252 ? 252 : LINE;
+    if (line == 153) to = x < 6 ? 6 : !mode_only ? LINE : x < 8 ? 8 : x < 12 ? 12 : LINE;
+    else if (mode_only && line < 144) to = x < MODE2_AT ? MODE2_AT : x < MODE3_AT ? MODE3_AT : x < HBLANK_AT ? HBLANK_AT : LINE;
+    else if (mode_only && x < LINE_IRQ_AT) to = LINE_IRQ_AT;
     // Land on the loop's own read grid: hardware sees the change at the first read after the boundary.
     gb.cyc += (to - x + poll_period - 1) / poll_period * poll_period;
 }
@@ -250,14 +279,14 @@ static void schedule(void)
     if (LCDC & 0x80) {
         uint32_t f = lcd_pos(), base = now - f;
         uint32_t t = base + FRAME;                                    // next frame start
-        if (!vblank_line_done) t = base + 144 * LINE;
+        if (!vblank_line_done) t = base + 144 * LINE + LINE_IRQ_AT;
         if (t - now < next - now) next = t;
-        if ((io[0x41] & 0x40) && !lyc_done && io[0x45] < 154 && io[0x45] * LINE >= f) {
-            t = base + io[0x45] * LINE;
+        if ((io[0x41] & 0x40) && !lyc_done && io[0x45] < 154 && lyc_event(io[0x45]) >= f) {
+            t = base + lyc_event(io[0x45]);
             if (t - now < next - now) next = t;
         }
         if ((io[0x41] & 0x28) && hblank_line < 144) {
-            t = base + hblank_line * LINE + 252;
+            t = base + hblank_line * LINE + HBLANK_AT;
             if (t - now < next - now) next = t;
         }
     }
@@ -278,18 +307,18 @@ HOT static void run_events(void)
     if (LCDC & 0x80) {
         uint32_t f = lcd_pos();
         uint32_t base = now - f;
-        if (!vblank_line_done && f >= 144 * LINE) {
+        if (!vblank_line_done && f >= 144 * LINE + LINE_IRQ_AT) {
             vblank_line_done = 1;
             pace();
-            raise_irq(0, base + 144 * LINE + VBLANK_IRQ_DELAY);
-            if (io[0x41] & 0x10) raise_irq(1, base + 144 * LINE + VBLANK_IRQ_DELAY);
+            raise_irq(0, base + 144 * LINE + LINE_IRQ_AT + VBLANK_IRQ_DELAY);
+            if (io[0x41] & 0x10) raise_irq(1, base + 144 * LINE + LINE_IRQ_AT + VBLANK_IRQ_DELAY);
         }
-        if ((io[0x41] & 0x40) && !lyc_done && io[0x45] < 154 && f >= io[0x45] * LINE) {
+        if ((io[0x41] & 0x40) && !lyc_done && io[0x45] < 154 && f >= lyc_event(io[0x45])) {
             lyc_done = 1;
-            raise_irq(1, base + io[0x45] * LINE);
+            raise_irq(1, base + lyc_event(io[0x45]));
         }
-        while ((io[0x41] & 0x28) && hblank_line < 144 && f >= hblank_line * LINE + 252) {
-            raise_irq(1, base + hblank_line * LINE + 252);
+        while ((io[0x41] & 0x28) && hblank_line < 144 && f >= hblank_line * LINE + HBLANK_AT) {
+            raise_irq(1, base + hblank_line * LINE + HBLANK_AT);
             hblank_line++;
         }
     }
@@ -471,12 +500,13 @@ HOT uint8_t gb_read_stat(void)
     for (int pass = 0;; pass++) {
         uint8_t mode = 0, ly = 0;
         if (LCDC & 0x80) {
-            uint32_t f = lcd_pos();
-            ly = line_of(f);
-            uint32_t x = f - ly * LINE;
-            mode = ly >= 144 ? 1 : x < 80 ? 2 : x < 252 ? 3 : 0;
+            uint32_t f = lcd_pos(), line = line_of(f), x = f - line * LINE;
+            if (line >= 144) mode = line == 144 && x < MODE2_AT ? 0 : 1;
+            else if (x < MODE2_AT) mode = line ? 0 : 1;   // previous line's HBlank / VBlank (CGB)
+            else mode = x < MODE3_AT ? 2 : x < HBLANK_AT ? 3 : 0;
+            ly = lyc_line(f) == io[0x45];
         }
-        uint8_t v = 0x80 | (io[0x41] & 0x78) | (ly == io[0x45]) << 2 | mode;
+        uint8_t v = 0x80 | (io[0x41] & 0x78) | ((LCDC & 0x80) && ly) << 2 | mode;
         if (pass || !(LCDC & 0x80) || !polling(0x41, v)) return v;
         skip_to_boundary(1);
     }
