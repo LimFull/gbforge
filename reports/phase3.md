@@ -76,9 +76,9 @@ BG 속성(VRAM 뱅크 1: 팔레트 0–7, 타일 뱅크, 뒤집기) → GBA 스�
 
 화면 비교는 두 에뮬레이터의 LCD 색 보정이 달라 색 값이 아닌 **색 대응(다수결 1:1)**으로 하고, 깜빡임 위상용 픽셀 허용치(`shot_tolerance`)를 시나리오별로 둘 수 있다(기본 0).
 
-## 5.1 검증 도구 제약: Mesen GBA 장시간 충돌
+## 5.1 검증 도구 수정: Mesen GBA 장시간 제어 끊김
 
-emucap 1.1.0 Mesen2 패키지는 **GBA를 약 7,500프레임 넘게 실행하면 비정상 종료**한다. `hello.gba`·`tiny.gba`도 같은 지점에서 재현되므로 포트와 무관하다. GB는 같은 길이에서 문제없다. macOS 충돌 보고서상 위치는 Avalonia 렌더링(`IOSurfaceRenderTarget presentSurface`, NULL 접근)이며, GBA 프레임 이력 보존 패치(0019) 이후 경로로 의심된다(미확인). 세이브 상태로 세션을 이어 붙이는 우회는 GBA가 BIOS `Halt` 중이라 `save_state`가 unsafe_halt로 거부되어 보류했다. 당장은 GBA 세션 하나를 7,000프레임 안에 끝내도록 시나리오를 구성한다(`tests/scenarios/dq12-king.json` 약 5,800프레임).
+GBA 세션이 약 7,600프레임에서 `invalid_native_observation`으로 제어가 끊겼다. 원인은 emucap의 Mesen 패치 0023: `getControlState`가 64비트 카운터를 `lua_pushintvalue`(내부에서 `(int)` 캐스트)로 넘겨, GBA PPU 사이클이 2^31(약 7,645프레임)을 넘으면 음수가 되고 Lua 쪽 검증이 세션을 폐기했다. Mesen 프로세스는 살아 있었다(앞서 의심한 Avalonia 충돌 보고서는 종료 시점의 별개 증상). emucap `d141eda`에서 카운터를 `lua_Integer`로 넘기도록 고쳤고, 12,000프레임 연속 실행으로 확인했다. 재빌드한 호스트를 `MESEN_BIN`으로 지정해야 한다.
 
 ## 6. 다음 작업
 

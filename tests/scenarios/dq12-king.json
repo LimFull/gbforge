@@ -509,5 +509,5 @@
   }
  ],
  "shot_tolerance": 160,
- "description": "DQ1: boot \u2192 name \u2192 intro \u2192 throne room \u2192 king's speech \u2192 step up \u2192 talk to the king. Scenario frames are GB frames on the port; keep one GBA session under ~7000 frames (Mesen GBA crash)."
+ "description": "DQ1: boot \u2192 name \u2192 intro \u2192 throne room \u2192 king's speech \u2192 step up \u2192 talk to the king. Scenario frames are GB frames on the port."
 }

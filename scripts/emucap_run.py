@@ -10,7 +10,8 @@ Scenario: {"steps": [
   {"tap": ["right"], "press": 2, "after": 2},     # frame-exact input
   {"read": "label", "memory_type": "gameboyMemory", "address": 49152, "length": 5},
   {"shot": "label"},                               # OUTDIR/label.png
-  {"write": {"memory_type": "gbCartRam", "address": 0, "fill": 0, "length": 8192}}  # or "hex": "..."
+  {"write": {"memory_type": "gbCartRam", "address": 0, "fill": 0, "length": 8192}},  # or "hex": "..."
+  {"reset": true}                                  # soft reset (battery RAM survives)
 ]}
 Writes OUTDIR/result.json: {"rom_sha256", "system", "reads": {label: hex}, "shots": {label: sha256}}.
 Env: EMUCAP_MCP (or emucap-mcp on PATH), MESEN_BIN, EMUCAP_GBA_BIOS — see local.env.example.
@@ -77,7 +78,8 @@ class GbClock:
             self.m.call("step", {"count": left})
 
 
-def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None):
+def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None, extra=None):
+    """Play the scenario; `extra(do)` (if given) may then execute more steps in the same session."""
     os.makedirs(outdir, exist_ok=True)
     result = {"rom": os.path.basename(rom),
               "rom_sha256": hashlib.sha256(open(rom, "rb").read()).hexdigest(),
@@ -93,48 +95,57 @@ def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None)
         result["system"] = args.get("system")
         result["emulator"] = f"Mesen {host.get('tag')} ({host.get('commit', '')[:10]})"
         clock = GbClock(m, gb_frames_addr) if gb_frames_addr else None
+
+        def do(s):
+            if "step" in s and clock:
+                clock.step(s["step"])
+            elif "tap" in s and clock:
+                result.setdefault("inputs", []).append({"gb_frame": clock.now(), "buttons": s["tap"], "press": s.get("press", 2)})
+                rev = m.call("debug", {"operation": "describe"})["capability_revision"]
+                dbg = lambda args: m.call("debug", {"operation": "set_input", "arguments": args, "known_capability_revision": rev})
+                dbg({"buttons": s["tap"]})
+                clock.step(s.get("press", 2))
+                dbg({"buttons": []})
+                clock.step(s.get("after", 1))
+            elif "step" in s:
+                m.call("step", {"count": s["step"]})
+            elif "tap" in s:
+                result.setdefault("inputs", []).append(
+                    {"frame": m.call("status", {})["frame"], "buttons": s["tap"], "press": s.get("press", 2)})
+                m.call("tap", {"buttons": s["tap"], "press_frames": s.get("press", 2),
+                               "after_frames": s.get("after", 1)})
+            elif "until" in s and "eq" in s:
+                until_eq(m, translate(dict(s["until"], length=len(s["eq"]) // 2)), s["eq"], s.get("max", 1000))
+            elif "until" in s:
+                spec = translate(dict(s["until"], length=1))
+                for _ in range(s.get("max", 1000)):
+                    if int(m.call("read_memory", spec)["hex"], 16) >= s["ge"]:
+                        break
+                    m.call("step", {"count": 1})
+                else:
+                    raise SystemExit(f"until: condition not reached within {s.get('max', 1000)} frames")
+            elif "read" in s:
+                spec = translate({k: s[k] for k in ("memory_type", "address", "length")})
+                result["reads"][s["read"]] = m.call("read_memory", spec)["hex"]
+            elif "write" in s:
+                w = dict(s["write"])
+                if "fill" in w:
+                    w["hex"] = f"{w.pop('fill'):02x}" * w.pop("length")
+                m.call("write_memory", translate(w))
+            elif "shot" in s:
+                r = m.call("screenshot", {"save_path": os.path.join(outdir, s["shot"] + ".png")})
+                result["shots"][s["shot"]] = r["provenance"]["sha256"]
+            elif "reset" in s:  # soft reset; cart RAM (GBA SRAM on a port) survives it
+                result.setdefault("inputs", []).append({"reset": m.call("status", {})["frame"]})  # frame count restarts
+                m.call("reset", {})
+                m.call("pause", {})  # reset resumes the guest; re-align with an "until" step after this
+            else:
+                raise SystemExit(f"unknown step: {s}")
         try:
             for s in scenario["steps"]:
-                if "step" in s and clock:
-                    clock.step(s["step"])
-                elif "tap" in s and clock:
-                    result.setdefault("inputs", []).append({"gb_frame": clock.now(), "buttons": s["tap"], "press": s.get("press", 2)})
-                    rev = m.call("debug", {"operation": "describe"})["capability_revision"]
-                    dbg = lambda args: m.call("debug", {"operation": "set_input", "arguments": args, "known_capability_revision": rev})
-                    dbg({"buttons": s["tap"]})
-                    clock.step(s.get("press", 2))
-                    dbg({"buttons": []})
-                    clock.step(s.get("after", 1))
-                elif "step" in s:
-                    m.call("step", {"count": s["step"]})
-                elif "tap" in s:
-                    result.setdefault("inputs", []).append(
-                        {"frame": m.call("status", {})["frame"], "buttons": s["tap"], "press": s.get("press", 2)})
-                    m.call("tap", {"buttons": s["tap"], "press_frames": s.get("press", 2),
-                                   "after_frames": s.get("after", 1)})
-                elif "until" in s and "eq" in s:
-                    until_eq(m, translate(dict(s["until"], length=len(s["eq"]) // 2)), s["eq"], s.get("max", 1000))
-                elif "until" in s:
-                    spec = translate(dict(s["until"], length=1))
-                    for _ in range(s.get("max", 1000)):
-                        if int(m.call("read_memory", spec)["hex"], 16) >= s["ge"]:
-                            break
-                        m.call("step", {"count": 1})
-                    else:
-                        raise SystemExit(f"until: condition not reached within {s.get('max', 1000)} frames")
-                elif "read" in s:
-                    spec = translate({k: s[k] for k in ("memory_type", "address", "length")})
-                    result["reads"][s["read"]] = m.call("read_memory", spec)["hex"]
-                elif "write" in s:
-                    w = dict(s["write"])
-                    if "fill" in w:
-                        w["hex"] = f"{w.pop('fill'):02x}" * w.pop("length")
-                    m.call("write_memory", translate(w))
-                elif "shot" in s:
-                    r = m.call("screenshot", {"save_path": os.path.join(outdir, s["shot"] + ".png")})
-                    result["shots"][s["shot"]] = r["provenance"]["sha256"]
-                else:
-                    raise SystemExit(f"unknown step: {s}")
+                do(s)
+            if extra:
+                extra(do)
             result["final_frame"] = m.call("status", {})["frame"]
         finally:
             m.call("stop", {"launch_id": launch_id})

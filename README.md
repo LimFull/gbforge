@@ -45,7 +45,7 @@ The GBA's GB compatibility mode is a separate hardware mode. This project produc
 
 ## Development
 
-Requirements: git, CMake, Ninja, Python 3, [RGBDS](https://rgbds.gbdev.io/), devkitARM (native, or the `devkitpro/devkitarm` Docker image via `scripts/dkarm.sh`), [mGBA](https://mgba.io/), and [emucap](https://github.com/mcpads/emucap) with its Mesen2 package (GBA needs a BIOS you own).
+Requirements: git, CMake, Ninja, Python 3, [RGBDS](https://rgbds.gbdev.io/), devkitARM (native, or the `devkitpro/devkitarm` Docker image via `scripts/dkarm.sh`), [mGBA](https://mgba.io/), and [emucap](https://github.com/mcpads/emucap) with its Mesen2 host (`adapters/mesen2/build.sh`; GBA sessions longer than ~7,600 frames need the host fix in LimFull/emucap `d141eda`, and GBA needs a BIOS you own).
 
 ```bash
 cp local.env.example local.env            # set emucap / Mesen / BIOS paths
@@ -66,6 +66,11 @@ scripts/emucap_run.py tests/fixtures/tiny/tiny.gb tests/scenarios/tiny-smoke.jso
 scripts/emucap_run.py examples/hello-gba/hello.gba tests/scenarios/hello-gba-smoke.json build/smoke/hello
 scripts/mgba_peek.py examples/hello-gba/hello.gba 3 3000144:6   # mGBA cross-check via its GDB stub
 tools/gb2gba.py verify tests/fixtures/tiny/tiny.gb out/tiny.gba --scenario tests/scenarios/tiny-diff.json --out build/verify/tiny
+
+# find an input route on the original in one live session; build/route/steps.json becomes a scenario
+scripts/emucap_explore.py serve roms/game.gbc PREFIX.json build/route &
+scripts/emucap_explore.py send build/route right:12:20 a:3:100 shot:here
+scripts/scenario_cdl.py roms/game.gbc SCENARIO.json build/game.cdl --merge build/game.cdl   # coverage for `port --cdl`
 ```
 
 How a port works: `gbforge-core` links gb-recompiled's analyzer and turns each analyzed GB function into a C function (`runtime-gba/gb.h` is the contract). `runtime-gba/gb.c` provides the GB memory map, MBC, IO and interrupts. It mirrors GB VRAM writes straight into GBA BG hardware and reads the GB ROM in place from the cartridge.

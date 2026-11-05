@@ -22,6 +22,8 @@ def main():
     p.add_argument("--inputs", default="")
     p.add_argument("--merge", help="OR the result into this existing CDL")
     p.add_argument("--clear-cart", type=int, help="zero this many cart RAM bytes at power-on")
+    p.add_argument("--cart-in", help="load this file into cart RAM at power-on")
+    p.add_argument("--cart-out", help="write cart RAM to this file at the end")
     a = p.parse_args()
     mesen = os.environ.get("MESEN_BIN")
     if not mesen:
@@ -32,7 +34,9 @@ def main():
     with open(os.path.join(home, "settings.json"), "w") as f:
         f.write(SETTINGS)
     out = os.path.abspath(a.out)
-    env = dict(os.environ, CDL_OUT=out, CDL_FRAMES=str(a.frames), CDL_INPUTS=a.inputs)
+    env = dict(os.environ, CDL_OUT=out, CDL_FRAMES=str(a.frames), CDL_INPUTS=a.inputs,
+               CDL_CART_IN=os.path.abspath(a.cart_in) if a.cart_in else "",
+               CDL_CART_OUT=os.path.abspath(a.cart_out) if a.cart_out else "")
     if a.clear_cart:
         env["CDL_CLEAR_CART"] = str(a.clear_cart)
     subprocess.run([os.path.join(home, "Mesen"), "--testRunner", os.path.abspath(a.rom),
