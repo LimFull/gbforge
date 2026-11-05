@@ -573,6 +573,7 @@ HOT void gb_write_io(uint8_t r, uint8_t v)
             ppu_on_at = gb.cyc;
             lcd_first_line = 1;
             vblank_line_done = lyc_done = hblank_line = 0;
+            if ((io[0x41] & 0x40) && io[0x45] == 0) raise_irq(1, gb.cyc);  // LY=0 matches LYC=0 at once
         }
         if ((old & 0x80) && !(v & 0x80)) { ppu_acc += gb.cyc - ppu_on_at; pace_at = gb.cyc + FRAME; }
         ppu_lcdc(old);
