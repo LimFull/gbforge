@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Find an input route on the original in one live emulator session, recording a replayable scenario.
 
-  emucap_explore.py serve ROM PREFIX.json OUTDIR     # play PREFIX, then run steps sent by `send`
+  emucap_explore.py serve ROM PREFIX.json OUTDIR     # play PREFIX, then run steps sent by `send` (ROM or port)
   emucap_explore.py send OUTDIR OP...                # OP: btn[+btn]:press:after | wait:N | shot:NAME | quit | JSON step
 
 Every executed step is appended to OUTDIR/steps.json, a scenario for emucap_run/verify. One session
@@ -63,7 +63,7 @@ def serve(rom, prefix, outdir):
                 except Exception as e:  # report and keep the session; the step was not recorded
                     conn.sendall(f"error: {e}\n".encode())
 
-    emucap_run.run(os.path.abspath(rom), prefix, outdir, extra=loop)
+    emucap_run.run(os.path.abspath(rom), prefix, outdir, extra=loop, **emucap_run.port_options(rom))
 
 
 def send(outdir, ops):

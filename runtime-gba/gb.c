@@ -630,6 +630,7 @@ void gb_trap(uint16_t bank, uint16_t addr, uint8_t reason)
     pal_bg_mem[0] = CLR_BLACK;            // the game's palettes may hide TTE's ink colour
     for (int i = 1; i < 256; i++) pal_bg_mem[i] = CLR_WHITE;
     tte_init_se_default(0, BG_CBB(2) | BG_SBB(31));
+    tte_init_con();                       // tte_printf goes through stdio: without this it prints nothing
     tte_printf("#{P:8,8}gbforge trap\n#{X:8}%s\n#{X:8}at %02X:%04X", names[reason < 6 ? reason : 0], bank, addr);
     for (;;) Halt();
 }

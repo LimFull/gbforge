@@ -162,9 +162,30 @@ def core(args):
     return r.returncode
 
 
-def analysis_args(args):
+def far_call_entries(rom):
+    """Targets of constant far calls `LD HL,nn / LD B,bank / RST n` (either load order) through an RST
+    handler that writes B to the MBC ROM bank register and then jumps to HL (DQ1&2's RST $10). Static
+    evidence for entries that a CDL only has when the original happened to run them."""
+    def far_rst(v):
+        i = rom.find(b"\x78\xea", v, v + 8)  # LD A,B ; LD (nn),A
+        if i < 0 or not 0x20 <= rom[i + 3] < 0x40:
+            return False
+        nxt = rom[i + 4]
+        return nxt == 0xE9 or (nxt & 0xC7 == 0xC7 and rom[nxt & 0x38] == 0xE9)  # JP HL, or RST to JP HL
+    rsts = [0xC7 | v for v in range(0, 0x40, 8) if far_rst(v)]
+    banks, found = len(rom) // 0x4000, set()
+    for rst in rsts:
+        for m in re.finditer(rb"\x21(..)\x06(.)" + bytes([rst]) + rb"|\x06(.)\x21(..)" + bytes([rst]), rom, re.S):
+            addr = int.from_bytes(m.group(1) or m.group(4), "little")
+            bank = (m.group(2) or m.group(3))[0]
+            if 0x4000 <= addr < 0x8000 and 0 < bank < banks:
+                found.add(f"{bank:02X}:{addr:04X}")
+    return sorted(found)
+
+
+def analysis_args(args, rom):
     out = ["--no-scan"] if args.no_scan else []
-    for e in args.entry or []:
+    for e in (args.entry or []) + far_call_entries(rom):
         out += ["--entry", e]
     if args.trace:
         out += ["--trace", args.trace]
@@ -187,7 +208,7 @@ def cmd_analyze(args):
     rom, report = inspect_or_exit(args.rom)
     os.makedirs(args.out, exist_ok=True)
     out = os.path.join(args.out, "analysis.json")
-    if core(["analyze", args.rom, out, *analysis_args(args)]) != 0:
+    if core(["analyze", args.rom, out, *analysis_args(args, rom)]) != 0:
         return 2
     with open(out) as f:
         summary = json.load(f)["summary"]
@@ -250,7 +271,8 @@ def cmd_port(args):
             json.dump(report, f, indent=2, sort_keys=True)
         return code
 
-    if core(["codegen", args.rom, gen, *analysis_args(args)]) != 0:
+    report["far_call_entries"] = len(far_call_entries(rom))
+    if core(["codegen", args.rom, gen, *analysis_args(args, rom)]) != 0:
         return finish(3, errors=["codegen failed (see stderr)"])
     with open(os.path.join(gen, "codegen.json")) as f:
         cg = json.load(f)
@@ -350,13 +372,10 @@ def cmd_verify(args):
     import emucap_run
     with open(args.scenario) as f:
         scenario = json.load(f)
-    with open(os.path.splitext(args.port)[0] + ".map.json") as f:
-        doc = json.load(f)
-    tr = emucap_run.gb_to_gba(doc)
-    clock = int(doc["memory"]["gb_frames"], 16) if "gb_frames" in doc["memory"] else None  # GB-time frames
     try:
         orig = emucap_run.run(os.path.abspath(args.rom), scenario, os.path.join(args.out, "original"))
-        port = emucap_run.run(os.path.abspath(args.port), scenario, os.path.join(args.out, "port"), tr, clock)
+        port = emucap_run.run(os.path.abspath(args.port), scenario, os.path.join(args.out, "port"),
+                              **emucap_run.port_options(args.port))  # GB-time frames, GBA addresses
     except Exception as e:  # emucap/emulator failures are external-tool errors, not mismatches
         print(f"error: {e}", file=sys.stderr)
         return 6

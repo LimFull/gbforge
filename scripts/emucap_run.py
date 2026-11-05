@@ -65,20 +65,40 @@ class GbClock:
     """Count scenario frames in GB time on a port (its GB VBlanks), so a port that lags in heavy
     scenes still receives each input at the same game moment as the original."""
 
-    def __init__(self, m, addr):
-        self.m, self.addr = m, addr
+    def __init__(self, m, addr, trap_addr=None):
+        self.m, self.addr, self.trap_addr = m, addr, trap_addr
 
     def now(self):
         h = self.m.call("read_memory", {"memory_type": "gbaMemory", "address": self.addr, "length": 4})["hex"]
         return int.from_bytes(bytes.fromhex(h), "little")
 
     def step(self, n):
-        target = self.now() + n
+        target, idle = self.now() + n, 0
         while (left := target - self.now()) > 0:
             self.m.call("step", {"count": left})
+            idle = idle + left if self.now() == target - left else 0
+            if idle > 120:  # 2 s of GBA frames without a GB frame (lag is far shorter): trapped or hung
+                why = ""
+                if self.trap_addr:  # gb_trap_info: u16 bank, u16 addr, u8 reason, u8 hit
+                    t = bytes.fromhex(self.m.call("read_memory", {"memory_type": "gbaMemory", "address": self.trap_addr, "length": 6})["hex"])
+                    if t[5]:
+                        why = f": trap {t[4]} at {int.from_bytes(t[0:2], 'little'):02X}:{int.from_bytes(t[2:4], 'little'):04X}"
+                raise RuntimeError(f"port stopped counting GB frames at {target - left}{why}")
 
 
-def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None, extra=None):
+def port_options(rom):
+    """run() keyword arguments for a gb2gba port (next to its .map.json); none for an original ROM."""
+    map_path = os.path.splitext(rom)[0] + ".map.json"
+    if not (rom.endswith(".gba") and os.path.exists(map_path)):
+        return {}
+    doc = json.load(open(map_path))
+    mem = doc["memory"]
+    return {"translate": gb_to_gba(doc),
+            "gb_frames_addr": int(mem["gb_frames"], 16) if "gb_frames" in mem else None,
+            "trap_addr": int(mem["trap"], 16) if "trap" in mem else None}
+
+
+def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None, extra=None, trap_addr=None):
     """Play the scenario; `extra(do)` (if given) may then execute more steps in the same session."""
     os.makedirs(outdir, exist_ok=True)
     result = {"rom": os.path.basename(rom),
@@ -94,7 +114,7 @@ def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None,
         launch_id = st["runtime_instance"]["launch_id"]
         result["system"] = args.get("system")
         result["emulator"] = f"Mesen {host.get('tag')} ({host.get('commit', '')[:10]})"
-        clock = GbClock(m, gb_frames_addr) if gb_frames_addr else None
+        clock = GbClock(m, gb_frames_addr, trap_addr) if gb_frames_addr else None
 
         def do(s):
             if "step" in s and clock:
@@ -160,9 +180,4 @@ if __name__ == "__main__":
     if not EMUCAP_MCP:
         raise SystemExit("emucap-mcp not found: set EMUCAP_MCP (see local.env.example)")
     rom, scen, out = sys.argv[1:]
-    map_path = os.path.splitext(rom)[0] + ".map.json"
-    port = rom.endswith(".gba") and os.path.exists(map_path)
-    doc = json.load(open(map_path)) if port else {}
-    tr = gb_to_gba(doc) if port else (lambda s: s)
-    clock = int(doc["memory"]["gb_frames"], 16) if port and "gb_frames" in doc["memory"] else None
-    print(json.dumps(run(os.path.abspath(rom), json.load(open(scen)), os.path.abspath(out), tr, clock), indent=2))
+    print(json.dumps(run(os.path.abspath(rom), json.load(open(scen)), os.path.abspath(out), **port_options(rom)), indent=2))
