@@ -144,7 +144,9 @@ def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None,
 
     {"inject": {"at": PC}}: on the original, run to PC (a compiled entry, e.g. the main loop's
     idle wait) and save the whole GB state; on a port, load the original's saved state
-    (`inject_states`, in order) so both continue from identical state."""
+    (`inject_states`, in order) so both continue from identical state. With "every": N it also
+    repeats before the first tap once N scenario frames have passed since the last one ("every": 0
+    stops). Each checkpoint pauses the original, so keep N as large as the comparison allows."""
     os.makedirs(outdir, exist_ok=True)
     result = {"rom": os.path.basename(rom),
               "rom_sha256": hashlib.sha256(open(rom, "rb").read()).hexdigest(),
@@ -160,8 +162,36 @@ def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None,
         result["system"] = args.get("system")
         result["emulator"] = f"Mesen {host.get('tag')} ({host.get('commit', '')[:10]})"
         clock = GbClock(m, gb_frames_addr, trap_addr) if gb_frames_addr else None
+        if inject is None and args.get("system") in ("gb", "gbc"):
+            # Mesen fills RAM with random values at power-on, so two runs of the same scenario could
+            # differ wherever a game reads memory it never wrote. Zero it, as a port powers on.
+            for kind, size in (("gbWorkRam", 0x8000), ("gbHighRam", 0x7F)):
+                for a in range(0, size, 0x4000):
+                    m.call("write_memory", {"memory_type": kind, "address": a, "hex": "00" * min(0x4000, size - a)})
+            m.call("write_memory", {"memory_type": "gameboyMemory", "address": 0xFF30, "hex": "00" * 16})  # wave RAM
+
+        periodic = {"at": None, "every": 0, "since": 0}
+
+        def inject_now(at):
+            n = len(result.setdefault("inject", []))
+            if inject is None:  # original
+                run_to_pc(m, at, 120)
+                name = f"inject-{n}.bin"
+                with open(os.path.join(outdir, name), "wb") as f:
+                    f.write(capture_state(m))
+                result["inject"].append(name)
+            else:  # port: fill struct GbInject, then arm it (applied at the next GB frame tick)
+                data = open(inject_states[n], "rb").read()
+                for i in range(4, len(data), 0x4000):
+                    m.call("write_memory", {"memory_type": "gbaMemory", "address": inject + i, "hex": data[i:i + 0x4000].hex()})
+                m.call("write_memory", {"memory_type": "gbaMemory", "address": inject, "hex": "01000000"})
+                result["inject"].append(inject_states[n])
+            periodic["since"] = 0
 
         def do(s):
+            if "tap" in s and periodic["every"] and periodic["since"] >= periodic["every"]:
+                inject_now(periodic["at"])
+            periodic["since"] += s.get("step", 0) + (s.get("press", 2) + s.get("after", 1) if "tap" in s else 0)
             if "step" in s and clock:
                 clock.step(s["step"])
             elif "tap" in s and clock:
@@ -179,7 +209,9 @@ def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None,
                 set_keys(0x3FF)
                 clock.step(s.get("after", 1))
             elif "step" in s:
-                m.call("step", {"count": s["step"]})
+                r = m.call("step", {"count": s["step"]})
+                if r.get("status", "completed") != "completed":  # a silently short step desyncs everything after it
+                    raise SystemExit(f"step {s['step']} did not complete: {r}")
             elif "tap" in s:
                 result.setdefault("inputs", []).append(
                     {"frame": m.call("status", {})["frame"], "buttons": s["tap"], "press": s.get("press", 2)})
@@ -212,19 +244,9 @@ def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None,
                 r = m.call("screenshot", {"save_path": os.path.join(outdir, s["shot"] + ".png")})
                 result["shots"][s["shot"]] = r["provenance"]["sha256"]
             elif "inject" in s:
-                n = len(result.setdefault("inject", []))
-                if inject is None:  # original
-                    run_to_pc(m, s["inject"]["at"], s["inject"].get("max", 120))
-                    name = f"inject-{n}.bin"
-                    with open(os.path.join(outdir, name), "wb") as f:
-                        f.write(capture_state(m))
-                    result["inject"].append(name)
-                else:  # port: fill struct GbInject, then arm it (applied at the next GB frame tick)
-                    data = open(inject_states[n], "rb").read()
-                    for i in range(4, len(data), 0x4000):
-                        m.call("write_memory", {"memory_type": "gbaMemory", "address": inject + i, "hex": data[i:i + 0x4000].hex()})
-                    m.call("write_memory", {"memory_type": "gbaMemory", "address": inject, "hex": "01000000"})
-                    result["inject"].append(inject_states[n])
+                inject_now(s["inject"]["at"])
+                if "every" in s["inject"]:
+                    periodic.update(at=s["inject"]["at"], every=s["inject"]["every"])
             elif "reset" in s:  # soft reset; cart RAM (GBA SRAM on a port) survives it
                 result.setdefault("inputs", []).append({"reset": m.call("status", {})["frame"]})  # frame count restarts
                 m.call("reset", {})

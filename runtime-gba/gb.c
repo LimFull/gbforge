@@ -190,6 +190,7 @@ static uint32_t ppu_acc, ppu_on_at;       // LCD-on GB cycles before / since the
 volatile uint32_t gb_pace_next;
 static uint32_t div_base, tima_at;        // DIV origin; next TIMA overflow
 static uint32_t vblank_line_done, lyc_done, hblank_line;  // per-frame event progress
+static uint8_t lcd_first_line;            // still in line 0 of the first frame after the LCD came on
 
 static const uint16_t tac_period[4] = {1024, 16, 64, 256};
 uint32_t gb_irq_ready;
@@ -209,6 +210,7 @@ static uint32_t lcd_pos(void)             // cycles into the current LCD frame
 {
     uint32_t f = gb.cyc - frame_start;
     while (f >= FRAME) { frame_start += FRAME; f -= FRAME; vblank_line_done = lyc_done = 0; hblank_line = 0; }
+    if (f >= LINE) lcd_first_line = 0;
     return f;
 }
 
@@ -475,8 +477,14 @@ static void apu_write(uint8_t r, uint8_t v)
 {
     static const uint8_t nrx4[4] = {0x14, 0x19, 0x1E, 0x23}, nrx2[4] = {0x12, 0x17, 0x1A, 0x21};
     switch (r) {
-    case 0x11: case 0x16: case 0x20: ch_len[r == 0x11 ? 0 : r == 0x16 ? 1 : 3] = 64 - (v & 63); return;
-    case 0x1B: ch_len[2] = 256 - v; return;
+    case 0x11: case 0x16: case 0x20: case 0x1B: {  // length load: a running channel counts from it now
+        unsigned n = r == 0x11 ? 0 : r == 0x16 ? 1 : r == 0x20 ? 3 : 2;
+        apu_status();
+        ch_len[n] = n == 2 ? 256 - v : 64 - (v & 63);
+        if (ch_on & ch_len_on & (1 << n))
+            ch_end[n] = gb.cyc + (16384 - ((gb.cyc - div_base) & 16383)) + (ch_len[n] - 1) * 16384u;
+        return;
+    }
     case 0x12: case 0x17: case 0x21: if (!(v & 0xF8)) ch_on &= ~(1 << (r == 0x12 ? 0 : r == 0x17 ? 1 : 3)); return;
     case 0x1A: if (!(v & 0x80)) ch_on &= ~4; return;
     case 0x26: if (!(v & 0x80)) ch_on = 0; return;
@@ -527,7 +535,8 @@ HOT uint8_t gb_read_stat(void)
         uint8_t mode = 0, ly = 0;
         if (LCDC & 0x80) {
             uint32_t f = lcd_pos(), line = line_of(f), x = f - line * LINE;
-            if (line >= 144) mode = line == 144 && x < MODE2_AT ? 0 : 1;
+            if (line == 0 && lcd_first_line) mode = x < 87 ? 0 : x < HBLANK_AT + 3 ? 3 : 0;
+            else if (line >= 144) mode = line == 144 && x < MODE2_AT ? 0 : 1;
             else if (x < MODE2_AT) mode = line ? 0 : 1;   // previous line's HBlank / VBlank (CGB)
             else mode = x < MODE3_AT ? 2 : x < HBLANK_AT ? 3 : 0;
             ly = lyc_line(f) == io[0x45];
@@ -559,7 +568,12 @@ HOT void gb_write_io(uint8_t r, uint8_t v)
         for (unsigned b = 0; b < 5; b++) if ((v & ~old) >> b & 1) if_at[b] = gb.cyc;
         IF = v & 0x1F; update_irq(); break;
     case 0x40:
-        if (!(old & 0x80) && (v & 0x80)) { frame_start = ppu_on_at = gb.cyc; vblank_line_done = lyc_done = hblank_line = 0; }
+        if (!(old & 0x80) && (v & 0x80)) {  // the PPU restarts at line 0 dot 7, OAM search skipped (Mesen)
+            frame_start = gb.cyc - 7;
+            ppu_on_at = gb.cyc;
+            lcd_first_line = 1;
+            vblank_line_done = lyc_done = hblank_line = 0;
+        }
         if ((old & 0x80) && !(v & 0x80)) { ppu_acc += gb.cyc - ppu_on_at; pace_at = gb.cyc + FRAME; }
         ppu_lcdc(old);
         schedule();

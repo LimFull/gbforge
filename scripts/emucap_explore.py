@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Find an input route on the original in one live emulator session, recording a replayable scenario.
 
-  emucap_explore.py serve ROM PREFIX.json OUTDIR [--inject-at PC]   # play PREFIX, then run steps sent by `send`
+  emucap_explore.py serve ROM PREFIX.json OUTDIR     # play PREFIX, then run steps sent by `send`
   emucap_explore.py send OUTDIR OP...                # OP: btn[+btn]:press:after | wait:N | shot:NAME | quit | JSON step
 
 Every executed step is appended to OUTDIR/steps.json, a scenario for emucap_run/verify. One session
 instead of savestate checkpoints: an emucap savestate needs an instruction-step halt, which can run a
 HALTed CPU up to the next interrupt and shift the frame phase of every later input.
---inject-at PC records a state-injection checkpoint ({"inject": {"at": PC}}) before every tap, as
-the scenario will replay it: the checkpoint moves the original's frame phase, so record with it.
+A periodic {"inject": {"at": PC, "every": N}} in PREFIX keeps taking checkpoints while exploring,
+exactly as the scenario replays them (a checkpoint moves the original's frame phase).
 """
 import json
 import os
@@ -32,7 +32,7 @@ def parse(op):
     return {"tap": k.split("+"), "press": int(r[0]), "after": int(r[1])}
 
 
-def serve(rom, prefix, outdir, inject_at=None):
+def serve(rom, prefix, outdir):
     os.makedirs(outdir, exist_ok=True)
     steps = list(prefix["steps"])
     path = os.path.join(outdir, "sock")
@@ -58,9 +58,8 @@ def serve(rom, prefix, outdir, inject_at=None):
                         if "quit" in s:
                             conn.sendall(b"bye\n")
                             return
-                        for t in ([{"inject": {"at": inject_at}}] if inject_at is not None and "tap" in s else []) + [s]:
-                            do(t)
-                            steps.append(t)
+                        do(s)
+                        steps.append(s)
                     save()
                     conn.sendall(b"ok\n")
                 except Exception as e:  # report and keep the session; the step was not recorded
@@ -78,8 +77,7 @@ def send(outdir, ops):
 
 if __name__ == "__main__":
     if len(sys.argv) >= 5 and sys.argv[1] == "serve":
-        at = int(sys.argv[6], 16) if sys.argv[5:6] == ["--inject-at"] else None
-        serve(sys.argv[2], json.load(open(sys.argv[3])), sys.argv[4], at)
+        serve(sys.argv[2], json.load(open(sys.argv[3])), sys.argv[4])
     elif len(sys.argv) >= 3 and sys.argv[1] == "send":
         send(sys.argv[2], sys.argv[3:])
     else:
