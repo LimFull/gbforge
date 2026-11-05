@@ -179,12 +179,17 @@ static uint32_t frame_start;              // GB time of the current LCD frame's 
 static uint32_t pace_at;                  // next real-time sync point (LCD off)
 static uint32_t sync_frame;               // real-time frame the next GB frame may not precede
 volatile uint32_t gb_paced;               // GB frames so far, purely in GB time: scenarios count these
-// Frame position where a GB frame is counted and real time is synced (and so where an emucap frame
-// step stops). VBlank by default; a scenario sets it to its alignment point so the port stops at
-// the same GB time as the original, which steps whole frames from that point.
-volatile uint32_t gb_pace_f = 144 * 456 + 4;
+// KEYINPUT override for scenarios (0xFFFF: none). Emulators latch GBA input per frame, so a key set
+// through them reaches the game a frame late; a write here is seen by the next P1 read.
+volatile uint16_t gb_keys = 0xFFFF;
+// Scenario frames (gb_paced) tick every FRAME of LCD-on GB time, like an emulator's frame step:
+// it counts PPU cycles, and the PPU stops while the LCD is off. gb_pace_next is the LCD-on time of
+// the next tick (first VBlank at boot); scenarios move it to their alignment point + FRAME. Real-time
+// sync is separate and also runs while the LCD is off.
+static uint32_t ppu_acc, ppu_on_at;       // LCD-on GB cycles before / since the LCD last came on
+volatile uint32_t gb_pace_next;
 static uint32_t div_base, tima_at;        // DIV origin; next TIMA overflow
-static uint32_t vblank_line_done, lyc_done, hblank_line, paced_done;  // per-frame event progress
+static uint32_t vblank_line_done, lyc_done, hblank_line;  // per-frame event progress
 
 static const uint16_t tac_period[4] = {1024, 16, 64, 256};
 uint32_t gb_irq_ready;
@@ -203,7 +208,7 @@ static void raise_irq(unsigned bit, uint32_t at)
 static uint32_t lcd_pos(void)             // cycles into the current LCD frame
 {
     uint32_t f = gb.cyc - frame_start;
-    while (f >= FRAME) { frame_start += FRAME; f -= FRAME; vblank_line_done = lyc_done = paced_done = 0; hblank_line = 0; }
+    while (f >= FRAME) { frame_start += FRAME; f -= FRAME; vblank_line_done = lyc_done = 0; hblank_line = 0; }
     return f;
 }
 
@@ -269,9 +274,10 @@ static void skip_to_boundary(int mode_only)
 
 static void inject_poll(void);
 
-static void pace(void)                    // one GB frame done: don't run ahead of real time
+static uint32_t ppu_time(void) { return ppu_acc + ((LCDC & 0x80) ? gb.cyc - ppu_on_at : 0); }
+
+static void sync_real_time(void)          // one GB frame of time done: don't run ahead of real time
 {
-    gb_paced++;
     sync_frame++;
     if (gb_frames > sync_frame) {         // GB was slower than real time: that time is lost, as on
         gb_lag_frames += gb_frames - sync_frame;  // hardware — never catch up by running fast later
@@ -279,6 +285,12 @@ static void pace(void)                    // one GB frame done: don't run ahead 
     }
     while (gb_frames < sync_frame) Halt();
     inject_poll();
+}
+
+static void pace(void)                    // a scenario frame: count it, then sync real time
+{
+    gb_paced++;
+    sync_real_time();
 }
 
 static void schedule(void)
@@ -290,7 +302,8 @@ static void schedule(void)
         uint32_t t = base + FRAME;                                    // next frame start
         if (!vblank_line_done) t = base + 144 * LINE + LINE_IRQ_AT;
         if (t - now < next - now) next = t;
-        if (!paced_done && base + gb_pace_f - now < next - now) next = base + gb_pace_f;
+        int32_t d = gb_pace_next - ppu_time();
+        if (now + (d > 0 ? d : 0) - now < next - now) next = now + (d > 0 ? d : 0);
         if ((io[0x41] & 0x40) && !lyc_done && io[0x45] < 154 && lyc_event(io[0x45]) >= f) {
             t = base + lyc_event(io[0x45]);
             if (t - now < next - now) next = t;
@@ -312,13 +325,13 @@ HOT static void run_events(void)
     // With the LCD off there is no VBlank: pace every FRAME cycles instead.
     if (!(LCDC & 0x80) && (int32_t)(now - pace_at) >= 0) {
         pace_at += FRAME;
-        pace();
+        sync_real_time();
     }
     if (LCDC & 0x80) {
         uint32_t f = lcd_pos();
         uint32_t base = now - f;
-        if (!paced_done && f >= gb_pace_f) {
-            paced_done = 1;
+        if ((int32_t)(ppu_time() - gb_pace_next) >= 0) {
+            gb_pace_next += FRAME;
             pace();
         }
         if (!vblank_line_done && f >= 144 * LINE + LINE_IRQ_AT) {
@@ -491,7 +504,7 @@ HOT uint8_t gb_read_io(uint8_t r)
     switch (r) {
     case 0x00: {                          // P1: GBA KEYINPUT has the same active-low layout
         uint8_t sel = io[0x00], keys = 0x0F;
-        u16 k = REG_KEYINPUT;
+        u16 k = gb_keys > 0x3FF ? REG_KEYINPUT : gb_keys;
         if (!(sel & 0x10)) keys &= (k >> 4) & 0x0F;  // Right Left Up Down
         if (!(sel & 0x20)) keys &= k & 0x0F;         // A B Select Start
         return 0xC0 | (sel & 0x30) | keys;
@@ -546,8 +559,8 @@ HOT void gb_write_io(uint8_t r, uint8_t v)
         for (unsigned b = 0; b < 5; b++) if ((v & ~old) >> b & 1) if_at[b] = gb.cyc;
         IF = v & 0x1F; update_irq(); break;
     case 0x40:
-        if (!(old & 0x80) && (v & 0x80)) { frame_start = gb.cyc; vblank_line_done = lyc_done = hblank_line = paced_done = 0; }
-        if ((old & 0x80) && !(v & 0x80)) pace_at = gb.cyc + FRAME;
+        if (!(old & 0x80) && (v & 0x80)) { frame_start = ppu_on_at = gb.cyc; vblank_line_done = lyc_done = hblank_line = 0; }
+        if ((old & 0x80) && !(v & 0x80)) { ppu_acc += gb.cyc - ppu_on_at; pace_at = gb.cyc + FRAME; }
         ppu_lcdc(old);
         schedule();
         break;
@@ -817,8 +830,9 @@ static void inject_apply(void)
     vblank_line_done = f >= 144 * LINE + LINE_IRQ_AT;
     lyc_done = f >= lyc_event(io[0x45]);
     hblank_line = s->line >= 144 ? 144 : s->line + (s->dot >= HBLANK_AT);
-    gb_pace_f = f;
-    paced_done = 1;
+    ppu_acc = 0;                          // the original steps whole frames from the capture
+    ppu_on_at = gb.cyc;
+    gb_pace_next = FRAME;
     div_base = gb.cyc - s->div;
     if (io[0x07] & 4) timer_restart();
     for (int n = 0; n < 5; n++) if_at[n] = gb.cyc;
@@ -885,6 +899,7 @@ int main(void)
     io[0x47] = 0xFC;
     ppu_init();
     pace_at = FRAME;
+    gb_pace_next = (144 * LINE + LINE_IRQ_AT + FRAME - (0u - frame_start) % FRAME) % FRAME;  // first VBlank
     schedule();
     irq_init(NULL);
     irq_add(II_VBLANK, vblank_isr);

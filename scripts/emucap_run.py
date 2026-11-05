@@ -95,6 +95,9 @@ def run_to_pc(m, pcs, max_frames):
             m.call("clear_breakpoint", {"id": bp})
 
 
+GBA_KEYS = {"a": 0, "b": 1, "select": 2, "start": 3, "right": 4, "left": 5, "up": 6, "down": 7, "r": 8, "l": 9}
+
+
 class GbClock:
     """Count scenario frames in GB time on a port (its GB VBlanks), so a port that lags in heavy
     scenes still receives each input at the same game moment as the original."""
@@ -111,7 +114,7 @@ class GbClock:
         while (left := target - self.now()) > 0:
             self.m.call("step", {"count": left})
             idle = idle + left if self.now() == target - left else 0
-            if idle > 120:  # 2 s of GBA frames without a GB frame (lag is far shorter): trapped or hung
+            if idle > 600:  # 10 s of GBA frames without a GB frame (LCD-off loads are far shorter): stuck
                 why = ""
                 if self.trap_addr:  # gb_trap_info: u16 bank, u16 addr, u8 reason, u8 hit
                     t = bytes.fromhex(self.m.call("read_memory", {"memory_type": "gbaMemory", "address": self.trap_addr, "length": 6})["hex"])
@@ -131,11 +134,12 @@ def port_options(rom):
             "gb_frames_addr": int(mem["gb_frames"], 16) if "gb_frames" in mem else None,
             "trap_addr": int(mem["trap"], 16) if "trap" in mem else None,
             "pace": {k: int(v, 16) for k, v in mem["pace"].items()} if "pace" in mem else None,
-            "inject": int(mem["inject"], 16) if "inject" in mem else None}
+            "inject": int(mem["inject"], 16) if "inject" in mem else None,
+            "keys": int(mem["keys"], 16) if "keys" in mem else None}
 
 
 def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None, extra=None, trap_addr=None,
-        pace=None, inject=None, inject_states=None):
+        pace=None, inject=None, inject_states=None, keys=None):
     """Play the scenario; `extra(do)` (if given) may then execute more steps in the same session.
 
     {"inject": {"at": PC}}: on the original, run to PC (a compiled entry, e.g. the main loop's
@@ -162,11 +166,17 @@ def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None,
                 clock.step(s["step"])
             elif "tap" in s and clock:
                 result.setdefault("inputs", []).append({"gb_frame": clock.now(), "buttons": s["tap"], "press": s.get("press", 2)})
-                rev = m.call("debug", {"operation": "describe"})["capability_revision"]
-                dbg = lambda args: m.call("debug", {"operation": "set_input", "arguments": args, "known_capability_revision": rev})
-                dbg({"buttons": s["tap"]})
+                if keys:  # the port's own override: seen by the game's next joypad read, like the original
+                    down = sum(1 << GBA_KEYS[b] for b in s["tap"])
+                    set_keys = lambda v: m.call("write_memory", {"memory_type": "gbaMemory", "address": keys, "hex": v.to_bytes(2, "little").hex()})
+                else:
+                    rev = m.call("debug", {"operation": "describe"})["capability_revision"]
+                    dbg = lambda args: m.call("debug", {"operation": "set_input", "arguments": args, "known_capability_revision": rev})
+                    set_keys = lambda v: dbg({"buttons": s["tap"] if v != 0x3FF else []})
+                    down = 1
+                set_keys(0x3FF & ~down)
                 clock.step(s.get("press", 2))
-                dbg({"buttons": []})
+                set_keys(0x3FF)
                 clock.step(s.get("after", 1))
             elif "step" in s:
                 m.call("step", {"count": s["step"]})
@@ -178,9 +188,10 @@ def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None,
             elif "until" in s and "eq" in s:
                 until_eq(m, translate(dict(s["until"], length=len(s["eq"]) // 2)), s["eq"], s.get("max", 1000))
                 if pace:  # count GB frames from this point, as the original steps whole frames from it
-                    rd = lambda a: int.from_bytes(bytes.fromhex(m.call("read_memory", {"memory_type": "gbaMemory", "address": a, "length": 4})["hex"]), "little")
-                    f = (rd(pace["cyc"]) - rd(pace["frame_start"])) % 70224
-                    m.call("write_memory", {"memory_type": "gbaMemory", "address": pace["pace_f"], "hex": f.to_bytes(4, "little").hex()})
+                    rd = lambda a, n=4: int.from_bytes(bytes.fromhex(m.call("read_memory", {"memory_type": "gbaMemory", "address": a, "length": n})["hex"]), "little")
+                    t = rd(pace["ppu_acc"]) + ((rd(pace["cyc"]) - rd(pace["ppu_on_at"])) if rd(pace["lcdc"], 1) & 0x80 else 0)
+                    m.call("write_memory", {"memory_type": "gbaMemory", "address": pace["pace_next"],
+                                            "hex": ((t + 70224) & 0xFFFFFFFF).to_bytes(4, "little").hex()})
             elif "until" in s:
                 spec = translate(dict(s["until"], length=1))
                 for _ in range(s.get("max", 1000)):

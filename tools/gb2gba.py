@@ -241,9 +241,11 @@ def write_map(sym_path, map_path, header):
             "frames": f"0x{syms['gb_frames']:08X}",          # u32 GBA VBlanks, then u32 lag frames
             "lag_frames": f"0x{syms['gb_lag_frames']:08X}",
             "gb_frames": f"0x{syms['gb_paced']:08X}",       # u32 GB frames elapsed in GB time
-            "pace": {"cyc": f"0x{syms['gb'] + 28:08X}", "frame_start": f"0x{syms['frame_start']:08X}",
-                     "pace_f": f"0x{syms['gb_pace_f']:08X}"},  # where the GB frame count ticks
+            "pace": {"cyc": f"0x{syms['gb'] + 28:08X}", "ppu_acc": f"0x{syms['ppu_acc']:08X}",
+                     "ppu_on_at": f"0x{syms['ppu_on_at']:08X}", "lcdc": f"0x{syms['io'] + 0x40:08X}",
+                     "pace_next": f"0x{syms['gb_pace_next']:08X}"},  # when the GB frame count ticks
             "inject": f"0x{syms['gb_inject']:08X}",         # struct GbInject (runtime-gba/gb.c)
+            "keys": f"0x{syms['gb_keys']:08X}",             # u16 KEYINPUT override, 0xFFFF = none
             **({"profile": {"pcs": f"0x{syms['gb_prof_pcs']:08X}", "count": f"0x{syms['gb_prof_count']:08X}", "size": 4096}}
                if "gb_prof_pcs" in syms else {}),
             # GB-visible windows. D000-DFFF matches only while SVBK selects bank 0/1 (CGB).
