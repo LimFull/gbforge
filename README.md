@@ -68,7 +68,8 @@ scripts/mgba_peek.py examples/hello-gba/hello.gba 3 3000144:6   # mGBA cross-che
 tools/gb2gba.py verify tests/fixtures/tiny/tiny.gb out/tiny.gba --scenario tests/scenarios/tiny-diff.json --out build/verify/tiny
 
 # find an input route on the original in one live session; build/route/steps.json becomes a scenario
-scripts/emucap_explore.py serve roms/game.gbc PREFIX.json build/route &
+# (--inject-at PC also records a state-injection checkpoint before every input, see below)
+scripts/emucap_explore.py serve roms/game.gbc PREFIX.json build/route [--inject-at 02E5] &
 scripts/emucap_explore.py send build/route right:12:20 a:3:100 shot:here
 scripts/scenario_cdl.py roms/game.gbc SCENARIO.json build/game.cdl --merge build/game.cdl   # coverage for `port --cdl`
 ```
@@ -76,6 +77,8 @@ scripts/scenario_cdl.py roms/game.gbc SCENARIO.json build/game.cdl --merge build
 How a port works: `gbforge-core` links gb-recompiled's analyzer and turns each analyzed GB function into a C function (`runtime-gba/gb.h` is the contract). `runtime-gba/gb.c` provides the GB memory map, MBC, IO and interrupts. It mirrors GB VRAM writes straight into GBA BG hardware and reads the GB ROM in place from the cartridge.
 
 `emucap_run.py` drives emucap's Control MCP over stdio (`scripts/mcp_client.py`), so it also works outside an agent session.
+
+Scenario steps also include `{"inject": {"at": PC}}`. On the original, it runs to PC, which must be a compiled entry outside interrupt handlers, such as the main loop's idle wait, and saves the whole GB state. On the port, the next GB frame tick loads that state into `gb_inject` and restarts native code at PC. Port timing is close to the original but not cycle-exact. Games that run an RNG in their idle loop (DQ1&2) would drift apart over hundreds of frames, so checkpoints restart the comparison from identical state.
 
 ## Target CLI (`--plugin`, `--renderer enhanced`, `--viewport`, `--graphics` not implemented yet)
 

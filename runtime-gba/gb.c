@@ -3,6 +3,8 @@
 // Compat renderer: GB VRAM/OAM/palette writes are mirrored straight into GBA BG/OBJ hardware
 // (see the PPU section), so there is no per-frame copy besides OAM. The 160x144 picture is
 // letterboxed at (40,8). ponytail: no audio yet.
+#include <setjmp.h>
+#include <string.h>
 #include <tonc.h>
 #include "gb.h"
 
@@ -265,6 +267,8 @@ static void skip_to_boundary(int mode_only)
     gb.cyc += (to - x + poll_period - 1) / poll_period * poll_period;
 }
 
+static void inject_poll(void);
+
 static void pace(void)                    // one GB frame done: don't run ahead of real time
 {
     gb_paced++;
@@ -274,6 +278,7 @@ static void pace(void)                    // one GB frame done: don't run ahead 
         sync_frame = gb_frames;
     }
     while (gb_frames < sync_frame) Halt();
+    inject_poll();
 }
 
 static void schedule(void)
@@ -756,6 +761,80 @@ void gb_trap(uint16_t bank, uint16_t addr, uint8_t reason)
     for (;;) Halt();
 }
 
+// ---- state injection (verification) ---------------------------------------------------
+// `gb2gba verify` can replace the whole GB state with one captured from the original, so a
+// comparison restarts from identical state instead of accumulating timing drift (an idle-loop RNG
+// follows every cycle). The tool fills gb_inject (fixed layout below, mirrored in
+// scripts/emucap_run.py) and sets .armed; the next GB frame tick applies it and restarts native
+// code at .pc, which must be a compiled entry (the tool captures at one).
+struct GbInject {
+    uint32_t armed;                       // 0
+    uint16_t pc, sp;                      // 4
+    uint8_t a, f, b, c, d, e, h, l;       // 8
+    uint8_t ime, ie, ram_enable, pad;     // 16
+    uint16_t rom_bank, line, dot, div;    // 20: PPU position of the capture, 16-bit DIV counter
+    uint8_t io[0x80];                     // 28: FF00-FF7F
+    uint8_t hram[0x80];                   // 156: FF80-FFFE
+    uint8_t bgpal[64], objpal[64];        // 284, 348: CGB palette RAM
+    uint8_t oam[0xA0];                    // 412
+    uint8_t wram[0x8000];                 // 572: CGB banks 0-7
+    uint8_t vram[0x4000];                 // 33340: banks 0-1
+};
+_Static_assert(__builtin_offsetof(struct GbInject, io) == 28 && __builtin_offsetof(struct GbInject, oam) == 412
+               && __builtin_offsetof(struct GbInject, vram) == 33340, "GbInject layout is shared with emucap_run.py");
+struct GbInject gb_inject EWRAM_BSS;
+static jmp_buf gb_restart;
+
+static void inject_apply(void)
+{
+    struct GbInject *s = &gb_inject;
+    s->armed = 0;
+    memcpy(gb_wram, s->wram, 0x2000);
+    memcpy(wram_hi, s->wram + 0x2000, sizeof wram_hi);
+    memcpy(vram, s->vram, sizeof vram);
+    memcpy(oam, s->oam, sizeof oam);
+    memcpy(gb_hram, s->hram, 0x7F);
+    IE = s->ie;
+    for (int i = 0; i < 32; i++) {
+        bg_pal[i] = s->bgpal[2 * i] | s->bgpal[2 * i + 1] << 8;
+        obj_pal[i] = s->objpal[2 * i] | s->objpal[2 * i + 1] << 8;
+    }
+    memcpy(io, s->io, 0x80);
+    ram_enable = s->ram_enable;
+    set_rom_bank(s->rom_bank);
+    map_cart_ram();
+    gb_write_io(0x70, io[0x70]);          // SVBK mapping
+    map_vram();
+    for (unsigned t = 0; t < 0x1800; t += 2) ppu_tile_row(0, t), ppu_tile_row(1, t);
+    for (unsigned off = 0; off < 0x800; off++) ppu_map_write(off);
+    ppu_lcdc(LCDC);
+    ppu_all_obj();
+    ppu_palettes();
+    ppu_scroll();
+    // GB time continues from the capture's frame position; it is also where frames now tick
+    uint32_t f = s->line * LINE + s->dot;
+    frame_start = gb.cyc - f;
+    vblank_line_done = f >= 144 * LINE + LINE_IRQ_AT;
+    lyc_done = f >= lyc_event(io[0x45]);
+    hblank_line = s->line >= 144 ? 144 : s->line + (s->dot >= HBLANK_AT);
+    gb_pace_f = f;
+    paced_done = 1;
+    div_base = gb.cyc - s->div;
+    if (io[0x07] & 4) timer_restart();
+    for (int n = 0; n < 5; n++) if_at[n] = gb.cyc;
+    gb_irq_ready = gb.cyc;
+    poll_reg = 0;
+    gb.a = s->a; unpack_f(s->f);
+    gb.b = s->b; gb.c = s->c; gb.d = s->d; gb.e = s->e; gb.h = s->h; gb.l = s->l;
+    gb.sp = s->sp;
+    gb.ime = s->ime;
+    update_irq();
+    schedule();
+    longjmp(gb_restart, 1);               // drop every native frame: the GB stack is the new one
+}
+
+static void inject_poll(void) { if (gb_inject.armed) inject_apply(); }
+
 // ---- boot -----------------------------------------------------------------------------
 
 #ifdef GB_PROFILE
@@ -814,6 +893,17 @@ int main(void)
     REG_TM2CNT = TM_ENABLE | TM_IRQ | TM_FREQ_1;
     irq_add(II_TIMER2, prof_isr);
 #endif
+    if (setjmp(gb_restart)) {             // after a state injection: dispatch to its PC
+        gb.frame_sp = 0xFFFF;
+        gb.jat = gb_inject.pc;
+        gb.jfn = gb_lookup(gb_inject.pc);
+        for (;;) {
+            if (!gb.jfn) { gb.jat = gb.ret; gb.jfn = gb_lookup(gb.ret); }
+            GbFn fn = gb.jfn;
+            gb.jfn = 0;
+            fn(gb.jat);
+        }
+    }
     gb_entry();
     gb_trap(0, 0, TRAP_EXIT);
 }

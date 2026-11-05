@@ -243,6 +243,7 @@ def write_map(sym_path, map_path, header):
             "gb_frames": f"0x{syms['gb_paced']:08X}",       # u32 GB frames elapsed in GB time
             "pace": {"cyc": f"0x{syms['gb'] + 28:08X}", "frame_start": f"0x{syms['frame_start']:08X}",
                      "pace_f": f"0x{syms['gb_pace_f']:08X}"},  # where the GB frame count ticks
+            "inject": f"0x{syms['gb_inject']:08X}",         # struct GbInject (runtime-gba/gb.c)
             **({"profile": {"pcs": f"0x{syms['gb_prof_pcs']:08X}", "count": f"0x{syms['gb_prof_count']:08X}", "size": 4096}}
                if "gb_prof_pcs" in syms else {}),
             # GB-visible windows. D000-DFFF matches only while SVBK selects bank 0/1 (CGB).
@@ -381,8 +382,9 @@ def cmd_verify(args):
                 orig = json.load(f)
         else:
             orig = emucap_run.run(os.path.abspath(args.rom), scenario, os.path.join(args.out, "original"))
+        inject = [os.path.join(args.out, "original", f) for f in orig.get("inject", [])]  # captured states
         port = emucap_run.run(os.path.abspath(args.port), scenario, os.path.join(args.out, "port"),
-                              **emucap_run.port_options(args.port))  # GB-time frames, GBA addresses
+                              inject_states=inject, **emucap_run.port_options(args.port))
     except Exception as e:  # emucap/emulator failures are external-tool errors, not mismatches
         print(f"error: {e}", file=sys.stderr)
         return 6

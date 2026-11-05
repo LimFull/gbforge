@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import shutil
+import struct
 import sys
 
 from mcp_client import Mcp
@@ -61,6 +62,39 @@ def until_eq(m, spec, want, max_frames):
         m.call("clear_breakpoint", {"id": bp})
 
 
+def capture_state(m):
+    """The original's whole GB state as runtime-gba's struct GbInject (armed=0). Capture at a
+    compiled entry outside interrupt handlers so the port can restart there."""
+    st = m.call("get_state", {"groups": ["cpu", "ppu", "cart", "memoryManager", "timer"]})["state"]
+
+    def rd(kind, addr, n):
+        return bytes.fromhex(m.call("read_memory", {"memory_type": kind, "address": addr, "length": n})["hex"])
+    io = bytearray(rd("gameboyMemory", 0xFF00, 0x80))
+    io[0x0F] = st["memoryManager.irqRequests"] & 0x1F
+    pal = lambda kind: b"".join((st[f"ppu.cgb{kind}Palettes{i}"] & 0xFFFF).to_bytes(2, "little") for i in range(32))
+    lcd = st["ppu.lcdEnabled"]
+    hdr = struct.pack("<IHH8B4B4H", 0, st["cpu.pc"], st["cpu.sp"],
+                      st["cpu.a"], st["cpu.flags"], st["cpu.b"], st["cpu.c"], st["cpu.d"], st["cpu.e"], st["cpu.h"], st["cpu.l"],
+                      int(st["cpu.ime"]), st["memoryManager.irqEnabled"], int(st["cart.ramEnabled"]), 0,
+                      st["cart.prgBank"], st["ppu.scanline"] if lcd else 0, st["ppu.cycle"] if lcd else 0,
+                      st["timer.divider"] & 0xFFFF)
+    return (hdr + bytes(io) + rd("gbHighRam", 0, 0x7F) + b"\0" + pal("Bg") + pal("Obj") + rd("gbSpriteRam", 0, 0xA0)
+            + rd("gbWorkRam", 0, 0x4000) + rd("gbWorkRam", 0x4000, 0x4000) + rd("gbVideoRam", 0, 0x4000))
+
+
+def run_to_pc(m, pcs, max_frames):
+    """Run until any of `pcs` (int or list) executes."""
+    pcs = pcs if isinstance(pcs, list) else [pcs]
+    bps = [m.call("set_breakpoint", {"kind": "exec", "memory_type": "gameboyMemory", "start": pc, "end": pc,
+                                     "pause_on_hit": True})["id"] for pc in pcs]
+    try:
+        if m.call("step", {"count": max_frames}).get("reason") != "breakpoint":
+            raise SystemExit(f"inject: none of {[hex(p) for p in pcs]} reached within {max_frames} frames")
+    finally:
+        for bp in bps:
+            m.call("clear_breakpoint", {"id": bp})
+
+
 class GbClock:
     """Count scenario frames in GB time on a port (its GB VBlanks), so a port that lags in heavy
     scenes still receives each input at the same game moment as the original."""
@@ -96,12 +130,17 @@ def port_options(rom):
     return {"translate": gb_to_gba(doc),
             "gb_frames_addr": int(mem["gb_frames"], 16) if "gb_frames" in mem else None,
             "trap_addr": int(mem["trap"], 16) if "trap" in mem else None,
-            "pace": {k: int(v, 16) for k, v in mem["pace"].items()} if "pace" in mem else None}
+            "pace": {k: int(v, 16) for k, v in mem["pace"].items()} if "pace" in mem else None,
+            "inject": int(mem["inject"], 16) if "inject" in mem else None}
 
 
 def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None, extra=None, trap_addr=None,
-        pace=None):
-    """Play the scenario; `extra(do)` (if given) may then execute more steps in the same session."""
+        pace=None, inject=None, inject_states=None):
+    """Play the scenario; `extra(do)` (if given) may then execute more steps in the same session.
+
+    {"inject": {"at": PC}}: on the original, run to PC (a compiled entry, e.g. the main loop's
+    idle wait) and save the whole GB state; on a port, load the original's saved state
+    (`inject_states`, in order) so both continue from identical state."""
     os.makedirs(outdir, exist_ok=True)
     result = {"rom": os.path.basename(rom),
               "rom_sha256": hashlib.sha256(open(rom, "rb").read()).hexdigest(),
@@ -161,6 +200,20 @@ def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None,
             elif "shot" in s:
                 r = m.call("screenshot", {"save_path": os.path.join(outdir, s["shot"] + ".png")})
                 result["shots"][s["shot"]] = r["provenance"]["sha256"]
+            elif "inject" in s:
+                n = len(result.setdefault("inject", []))
+                if inject is None:  # original
+                    run_to_pc(m, s["inject"]["at"], s["inject"].get("max", 120))
+                    name = f"inject-{n}.bin"
+                    with open(os.path.join(outdir, name), "wb") as f:
+                        f.write(capture_state(m))
+                    result["inject"].append(name)
+                else:  # port: fill struct GbInject, then arm it (applied at the next GB frame tick)
+                    data = open(inject_states[n], "rb").read()
+                    for i in range(4, len(data), 0x4000):
+                        m.call("write_memory", {"memory_type": "gbaMemory", "address": inject + i, "hex": data[i:i + 0x4000].hex()})
+                    m.call("write_memory", {"memory_type": "gbaMemory", "address": inject, "hex": "01000000"})
+                    result["inject"].append(inject_states[n])
             elif "reset" in s:  # soft reset; cart RAM (GBA SRAM on a port) survives it
                 result.setdefault("inputs", []).append({"reset": m.call("status", {})["frame"]})  # frame count restarts
                 m.call("reset", {})
