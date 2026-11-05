@@ -181,6 +181,18 @@ static uint32_t div_base, tima_at;        // DIV origin; next TIMA overflow
 static uint32_t vblank_line_done, lyc_done, hblank_line;  // per-frame event progress
 
 static const uint16_t tac_period[4] = {1024, 16, 64, 256};
+uint32_t gb_irq_ready;
+static uint32_t if_at[5];                 // GB time each IF bit was raised
+// Calibration knob: cycles from line 144 to the VBlank handler's first instruction beyond our
+// 20-cycle dispatch (the interrupted instruction finishing, IF latency). Measured against Mesen:
+// DQ1&2's handler writes C890 at line 4 dot 179 there, 43 cycles later than with 0.
+#define VBLANK_IRQ_DELAY 43
+
+static void raise_irq(unsigned bit, uint32_t at)
+{
+    if (!(IF & (1u << bit))) if_at[bit] = at;
+    IF |= 1u << bit;
+}
 
 static uint32_t lcd_pos(void)             // cycles into the current LCD frame
 {
@@ -198,12 +210,13 @@ static uint8_t ppu_ly(void) { return (LCDC & 0x80) ? line_of(lcd_pos()) : 0; }
 // Polling skip: reading LY or STAT again within 64 cycles and getting the same value means a
 // wait loop. Nothing it can observe changes before the next line / mode boundary, so GB time
 // jumps there (the loop would only have burned cycles). Events are handled at its back-edge.
-static uint32_t poll_cyc;
+static uint32_t poll_cyc, poll_period;
 static uint8_t poll_reg, poll_val;
 
 static int polling(uint8_t reg, uint8_t val)
 {
-    int again = reg == poll_reg && val == poll_val && gb.cyc - poll_cyc < 64;
+    poll_period = gb.cyc - poll_cyc;
+    int again = reg == poll_reg && val == poll_val && poll_period < 64 && poll_period;
     poll_reg = reg;
     poll_val = val;
     poll_cyc = gb.cyc;
@@ -215,7 +228,8 @@ static void skip_to_boundary(int mode_only)
     uint32_t f = lcd_pos(), line = line_of(f), x = f - line * LINE;
     uint32_t to = LINE;                           // next line
     if (mode_only && line < 144) to = x < 80 ? 80 : x < 252 ? 252 : LINE;
-    gb.cyc += to - x;
+    // Land on the loop's own read grid: hardware sees the change at the first read after the boundary.
+    gb.cyc += (to - x + poll_period - 1) / poll_period * poll_period;
 }
 
 static void pace(void)                    // one GB frame done: don't run ahead of real time
@@ -263,24 +277,26 @@ HOT static void run_events(void)
     }
     if (LCDC & 0x80) {
         uint32_t f = lcd_pos();
+        uint32_t base = now - f;
         if (!vblank_line_done && f >= 144 * LINE) {
             vblank_line_done = 1;
             pace();
-            IF |= 0x01 | ((io[0x41] & 0x10) ? 0x02 : 0);
+            raise_irq(0, base + 144 * LINE + VBLANK_IRQ_DELAY);
+            if (io[0x41] & 0x10) raise_irq(1, base + 144 * LINE + VBLANK_IRQ_DELAY);
         }
         if ((io[0x41] & 0x40) && !lyc_done && io[0x45] < 154 && f >= io[0x45] * LINE) {
             lyc_done = 1;
-            IF |= 0x02;
+            raise_irq(1, base + io[0x45] * LINE);
         }
         while ((io[0x41] & 0x28) && hblank_line < 144 && f >= hblank_line * LINE + 252) {
+            raise_irq(1, base + hblank_line * LINE + 252);
             hblank_line++;
-            IF |= 0x02;
         }
     }
     if ((io[0x07] & 4) && (int32_t)(now - tima_at) >= 0) {
         io[0x05] = io[0x06];
+        raise_irq(2, tima_at);
         tima_at += (256 - io[0x06]) * tac_period[io[0x07] & 3];
-        IF |= 0x04;
     }
     update_irq();
     schedule();
@@ -309,6 +325,7 @@ static void vram_dma(uint8_t ctl)         // CGB HDMA5. ponytail: HBlank mode co
     uint16_t src = (io[0x51] << 8 | io[0x52]) & 0xFFF0, dst = (io[0x53] << 8 | io[0x54]) & 0x1FF0;
     for (unsigned i = 0, n = ((ctl & 0x7F) + 1) * 16; i < n; i++)
         gb_write_slow(0x8000 | ((dst + i) & 0x1FFF), rd8(src + i));
+    gb.cyc += ((ctl & 0x7F) + 1) * 32;    // the CPU is halted 8 M-cycles per 16-byte block
     io[0x55] = 0xFF;
 }
 
@@ -380,6 +397,53 @@ static void mbc_write(uint16_t a, uint8_t v)
 
 // ---- IO -------------------------------------------------------------------------------
 
+// ---- APU status (no audio output) -------------------------------------------------------
+// Sound drivers read registers back and poll NR52's channel bits, and their cycle cost follows
+// what they see. Model the read masks and when a channel is on: trigger with its DAC on, until
+// the DAC goes off or an enabled length counter runs out. Length clocks every 16384 cycles on
+// the DIV grid. ponytail: no sweep overflow, no frame-sequencer edge cases.
+static const uint8_t apu_or[0x20] = {
+    0x80, 0x3F, 0x00, 0xFF, 0xBF, 0xFF, 0x3F, 0x00, 0xFF, 0xBF, 0x7F, 0xFF, 0x9F, 0xFF, 0xBF, 0xFF,
+    0xFF, 0x00, 0x00, 0xBF, 0x00, 0x00, 0x70, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static uint8_t ch_on, ch_len_on;          // NR52 bits 0-3; length enabled per channel
+static uint16_t ch_len[4];                // length counter loaded by NRx1
+static uint32_t ch_end[4];                // GB time the length counter silences the channel
+
+static uint8_t apu_status(void)
+{
+    for (int n = 0; n < 4; n++)
+        if ((ch_on & ch_len_on & (1 << n)) && (int32_t)(gb.cyc - ch_end[n]) >= 0) ch_on &= ~(1 << n);
+    return ch_on;
+}
+
+static void apu_write(uint8_t r, uint8_t v)
+{
+    static const uint8_t nrx4[4] = {0x14, 0x19, 0x1E, 0x23}, nrx2[4] = {0x12, 0x17, 0x1A, 0x21};
+    switch (r) {
+    case 0x11: case 0x16: case 0x20: ch_len[r == 0x11 ? 0 : r == 0x16 ? 1 : 3] = 64 - (v & 63); return;
+    case 0x1B: ch_len[2] = 256 - v; return;
+    case 0x12: case 0x17: case 0x21: if (!(v & 0xF8)) ch_on &= ~(1 << (r == 0x12 ? 0 : r == 0x17 ? 1 : 3)); return;
+    case 0x1A: if (!(v & 0x80)) ch_on &= ~4; return;
+    case 0x26: if (!(v & 0x80)) ch_on = 0; return;
+    }
+    for (int n = 0; n < 4; n++) {
+        if (r != nrx4[n]) continue;
+        apu_status();                         // settle expiry under the old length setting
+        uint8_t bit = 1 << n, dac = n == 2 ? io[0x1A] & 0x80 : io[nrx2[n]] & 0xF8;
+        if (v & 0x80) {
+            if (dac) ch_on |= bit;
+            if (!ch_len[n]) ch_len[n] = n == 2 ? 256 : 64;
+        }
+        if (v & 0x40) {
+            ch_len_on |= bit;
+            uint32_t next = gb.cyc + (16384 - ((gb.cyc - div_base) & 16383));
+            ch_end[n] = next + (ch_len[n] - 1) * 16384u;
+        } else {
+            ch_len_on &= ~bit;
+        }
+    }
+}
+
 HOT uint8_t gb_read_io(uint8_t r)
 {
     switch (r) {
@@ -397,7 +461,8 @@ HOT uint8_t gb_read_io(uint8_t r)
     case 0x44: return gb_read_ly();
     case 0x69: return bg_pal[(io[0x68] & 0x3F) >> 1] >> ((io[0x68] & 1) * 8);
     case 0x6B: return obj_pal[(io[0x6A] & 0x3F) >> 1] >> ((io[0x6A] & 1) * 8);
-    default: return io[r];
+    case 0x26: return (io[0x26] & 0x80) | 0x70 | apu_status();
+    default: return (uint8_t)(r - 0x10) < 0x20 ? io[r] | apu_or[r - 0x10] : io[r];
     }
 }
 
@@ -429,11 +494,14 @@ HOT void gb_write_io(uint8_t r, uint8_t v)
 {
     uint8_t old = io[r];
     io[r] = v;
+    if ((uint8_t)(r - 0x10) < 0x17) apu_write(r, v);
     switch (r) {
     case 0x04: div_base = gb.cyc; break;
     case 0x05: io[0x05] = v; timer_restart(); schedule(); break;
     case 0x07: io[0x05] = timer_tima(); io[0x07] = old; io[0x05] = timer_tima(); io[0x07] = v; timer_restart(); schedule(); break;
-    case 0x0F: IF = v & 0x1F; update_irq(); break;
+    case 0x0F:
+        for (unsigned b = 0; b < 5; b++) if ((v & ~old) >> b & 1) if_at[b] = gb.cyc;
+        IF = v & 0x1F; update_irq(); break;
     case 0x40:
         if (!(old & 0x80) && (v & 0x80)) { frame_start = gb.cyc; vblank_line_done = lyc_done = hblank_line = 0; }
         if ((old & 0x80) && !(v & 0x80)) pace_at = gb.cyc + FRAME;
@@ -475,7 +543,7 @@ HOT void gb_write_slow(uint16_t a, uint8_t v)
 {
     if (a >= 0xFF80) {                    // hottest slow-path case: the GB stack usually lives in HRAM/WRAM
         gb_hram[a - 0xFF80] = v;
-        if (a == 0xFFFF) update_irq();
+        if (a == 0xFFFF) { gb_irq_ready = gb.cyc; update_irq(); }
         return;
     }
     if (a < 0x8000) { mbc_write(a, v); return; }
@@ -507,6 +575,15 @@ HOT int gb_service_irq(uint16_t resume)
     IF &= ~(1 << n);
     gb.ime = 0;
     gb.irq = 0;
+    // We only notice interrupts at safepoints; hardware takes them at the next instruction. Run
+    // the handler at the time it became serviceable and add the skipped cycles back afterwards,
+    // so what it observes (LY, DIV, its own writes) lands when it would. Never step back across
+    // the frame or DIV origin.
+    uint32_t at = (int32_t)(gb_irq_ready - if_at[n]) > 0 ? gb_irq_ready : if_at[n];
+    uint32_t late = gb.cyc - at, lim = gb.cyc - div_base;
+    if ((LCDC & 0x80) && gb.cyc - frame_start < lim) lim = gb.cyc - frame_start;
+    if ((int32_t)late < 0 || late > lim) late = (int32_t)late < 0 ? 0 : lim;
+    gb.cyc -= late;
     gb.cyc += 20;                         // interrupt dispatch
     if (!gb_vectors[n]) gb_trap(0, 0x40 + 8 * n, TRAP_NO_ENTRY);
     uint16_t fs = gb.frame_sp;
@@ -515,6 +592,7 @@ HOT int gb_service_irq(uint16_t resume)
     gb_vectors[n](0x40 + 8 * n);
     int dead = gb_trampoline();
     gb.frame_sp = fs;
+    gb.cyc += late;
     return dead || gb.ret != resume;
 }
 
@@ -555,7 +633,11 @@ HOT int gb_trampoline(void)
 // ponytail: byte-pattern table; analyze the ROM source of copied routines if this list grows.
 static void hram_dma_imm(uint16_t at)     // 3E nn E0 46 ...: LD A,nn / LDH (46),A / wait / RET
 {
-    oam_dma(gb_hram[at - 0xFF80 + 1]);
+    const uint8_t *p = &gb_hram[at - 0xFF80];
+    // 3E kk 3D 20 FD C9: LD A,kk / DEC A / JR NZ,-3 / RET; anything else: the 160-M-cycle DMA wait
+    unsigned n = p[4] == 0x3E && p[6] == 0x3D && p[7] == 0x20 ? (p[5] ? p[5] : 256) : 40;
+    gb.cyc += 8 + 12 + 8 + n * 16 - 4 + 16;
+    oam_dma(p[1]);
     gb.a = 0;
     gb.ret = pop16();
 }
@@ -563,6 +645,7 @@ static void hram_dma_imm(uint16_t at)     // 3E nn E0 46 ...: LD A,nn / LDH (46)
 static void hram_io_wait(uint16_t at)     // E2 05 20 FD C9: LDH (C),A / DEC B / JR NZ,-3 / RET
 {
     (void)at;
+    gb.cyc += 8 + (gb.b ? gb.b : 256) * 16 - 4 + 16;
     gb_write_io(gb.c & 0x7F, gb.a);       // C=$46 starts OAM DMA
     gb.b = 0;
     gb.zf = 1; gb.nf = 1; gb.hf = 0;
@@ -669,6 +752,11 @@ int main(void)
     if (cgb_mode) {                       // post-boot-ROM register state (Pan Docs)
         gb.a = 0x11; gb.zf = 1;
         gb.b = 0x00; gb.c = 0x00; gb.d = 0xFF; gb.e = 0x56; gb.h = 0x00; gb.l = 0x0D;
+        // ...and timing: the CGB boot ROM hands over at LY 146, dot 179, DIV counter 0xD4DE
+        // (measured in Mesen at PC=0100). Games that run an RNG in their idle loop depend on it.
+        frame_start = -(146 * LINE + 179);
+        div_base = -0xD4DE;
+        hblank_line = 144;
     } else {
         gb.a = 0x01; gb.zf = 1; gb.hf = 1; gb.cf = 1;
         gb.b = 0x00; gb.c = 0x13; gb.d = 0x00; gb.e = 0xD8; gb.h = 0x01; gb.l = 0x4D;

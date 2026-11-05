@@ -72,7 +72,8 @@ enum { TRAP_UNDEFINED = 1, TRAP_NO_ENTRY = 2, TRAP_RET_MISMATCH = 3, TRAP_STOP =
 
 #define GB_CALL(RET_, CALL_) do { uint16_t fs_ = gb.frame_sp; push16(RET_); gb.frame_sp = gb.sp; \
     CALL_; int dead_ = gb.jfn ? gb_trampoline() : 0; gb.frame_sp = fs_; \
-    if (dead_ || gb.ret != (RET_)) return; } while (0)
+    if (dead_ || gb.ret != (RET_)) return; \
+    GB_SAFEPOINT(RET_); /* an IRQ raised during the callee is taken here, not a loop later */ } while (0)
 
 #define GB_JUMP(TGT_, FN_) do { gb.jat = (TGT_); gb.jfn = (FN_); return; } while (0)
 
@@ -82,7 +83,8 @@ enum { TRAP_UNDEFINED = 1, TRAP_NO_ENTRY = 2, TRAP_RET_MISMATCH = 3, TRAP_STOP =
 
 static inline __attribute__((always_inline)) void gb_di(void) { gb.ime = 0; gb.irq = 0; }
 // ponytail: EI takes effect immediately (codegen adds a safepoint right after it)
-static inline __attribute__((always_inline)) void gb_ei(void) { gb.ime = 1; gb.irq = (gb_hram[0x7F] & io[0x0F] & 0x1F) != 0; }
+extern uint32_t gb_irq_ready;             // GB time interrupts were last enabled (EI / IE write)
+static inline __attribute__((always_inline)) void gb_ei(void) { gb.ime = 1; gb_irq_ready = gb.cyc; gb.irq = (gb_hram[0x7F] & io[0x0F] & 0x1F) != 0; }
 
 // Constant addresses fold to a direct access at compile time; others go through the page table.
 static inline __attribute__((always_inline)) uint8_t rd8(uint16_t a)
