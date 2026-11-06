@@ -57,6 +57,7 @@ tools/gb2gba.py inspect rom.gbc [--json]  # header, mapper, sizes, SHA-256
 cmake -G Ninja -B build/core . && ninja -C build/core gbforge-core   # analyzer + codegen (C++)
 tools/gb2gba.py analyze tests/fixtures/tiny/tiny.gb --out build/tiny
 tools/gb2gba.py port tests/fixtures/tiny/tiny.gb --output out/tiny.gba
+# --colour gbc (default): CGB palettes go through a table so the GBA LCD shows what the GBC LCD showed; raw: unchanged
 
 make -C tests/fixtures/tiny               # rebuild our own test ROM (RGBDS)
 scripts/dkarm.sh make -C examples/hello-gba

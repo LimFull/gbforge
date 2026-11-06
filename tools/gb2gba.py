@@ -3,7 +3,7 @@
 
   gb2gba inspect ROM [--json]
   gb2gba analyze ROM --out DIR [--no-scan] [--entry BB:AAAA]... [--trace FILE] [--cdl FILE]
-  gb2gba port ROM --output OUT.gba [--native-policy strict] [--no-scan] [--entry BB:AAAA]... [--cdl FILE]
+  gb2gba port ROM --output OUT.gba [--native-policy strict] [--no-scan] [--entry BB:AAAA]... [--cdl FILE] [--colour gbc|raw]
   gb2gba verify ROM PORT.gba --scenario SCENARIO.json --out DIR [--reuse-original]   (needs emucap)
 
 Exit codes: 0 ok, 2 invalid ROM, 3 unresolved paths (strict), 5 over budget, 6 external tool error,
@@ -246,6 +246,7 @@ def write_map(sym_path, map_path, header):
                      "pace_next": f"0x{syms['gb_pace_next']:08X}"},  # when the GB frame count ticks
             "inject": f"0x{syms['gb_inject']:08X}",         # struct GbInject (runtime-gba/gb.c)
             "keys": f"0x{syms['gb_keys']:08X}",             # u16 KEYINPUT override, 0xFFFF = none
+            "colour": f"0x{syms['gb_colour']:08X}",         # u16[0x8000] CGB rgb555 -> GBA palette value
             **({"profile": {"pcs": f"0x{syms['gb_prof_pcs']:08X}", "count": f"0x{syms['gb_prof_count']:08X}", "size": 4096}}
                if "gb_prof_pcs" in syms else {}),
             # GB-visible windows. D000-DFFF matches only while SVBK selects bank 0/1 (CGB).
@@ -295,8 +296,13 @@ def cmd_port(args):
         print(f"warning: {report['unresolved_edges']} unresolved edges, gate bypassed", file=sys.stderr)
 
     shutil.copyfile(args.rom, os.path.join(gen, "rom.gb"))
+    report["colour"] = args.colour
+    table = colour_table() if args.colour == "gbc" else range(0x8000)
+    with open(os.path.join(gen, "colour.bin"), "wb") as f:
+        f.write(struct.pack("<32768H", *table))
     with open(os.path.join(gen, "rom.s"), "w") as f:
-        f.write('.section .rodata\n.global gb_rom\n.balign 4\ngb_rom:\n.incbin "rom.gb"\n')
+        f.write('.section .rodata\n.global gb_rom\n.balign 4\ngb_rom:\n.incbin "rom.gb"\n'
+                '.global gb_colour\n.balign 2\ngb_colour:\n.incbin "colour.bin"\n')
     title = re.sub(r"[^A-Z0-9]", "", report["rom_header"]["title"].upper())[:12] or "GBFORGE"
     make = [os.path.join(ROOT, "scripts", "dkarm.sh"), "make", "-s", f"-j{os.cpu_count() or 4}",
             "-C", os.path.join(ROOT, "runtime-gba"), f"GEN={gen}", f"OUT={out}", f"TITLE={title}"]
@@ -348,14 +354,77 @@ def read_png(path):
     return w, h, rows
 
 
-def same_picture(gb_png, gba_png, tolerance=0):
-    """GB 160x144 vs the port's letterboxed 240x160 at (40,8), equal up to a colour mapping
-    (the two emulators apply different LCD colour correction). Pixels disagreeing with the
-    majority mapping are counted; up to `tolerance` of them (blink phases) still pass."""
+# Mesen's LCD models, rgb555 -> displayed RGB: GbDefaultVideoFilter (GbcAdjustColors) and
+# GbaDefaultVideoFilter (GbaAdjustColors, the Ares formula), both on by default. The GBA LCD
+# shows the same rgb555 much darker and more saturated than the GBC LCD.
+def gbc_lcd(v):
+    r, g, b = v & 31, v >> 5 & 31, v >> 10 & 31
+    return (min(240, (r * 26 + g * 4 + b * 2) >> 2), min(240, (g * 24 + b * 8) >> 2),
+            min(240, (r * 6 + g * 4 + b * 22) >> 2))
+
+
+def gba_lcd(v):
+    lr, lg, lb = (((v >> s & 31) / 31.0) ** 4.0 for s in (0, 5, 10))
+    out = lambda m: int(min((m / 255) ** (1 / 2.2) * 0xFFFF / 280, 255))  # noqa: E731
+    return out(0 * lb + 50 * lg + 240 * lr), out(30 * lb + 230 * lg + 10 * lr), out(220 * lb + 10 * lg + 50 * lr)
+
+
+MIX_INV = ((50300, -11000, 1500), (-700, 52800, -7200), (-11400, 100, 54700))  # gba_lcd's mixing, inverted (/12037000)
+
+
+def colour_table():
+    """rgb555 -> the rgb555 that looks on the GBA LCD as the original looks on the GBC LCD (nearest RGB).
+    First guess by inverting gba_lcd, then hill-climb; within 1/255 of the exhaustive optimum."""
+    shown = [gba_lcd(v) for v in range(0x8000)]
+    table = []
+    for v in range(0x8000):
+        t = gbc_lcd(v)
+        mixed = [(c * 280 / 0xFFFF) ** 2.2 * 255 for c in t]
+        lin = [max(0.0, min(1.0, sum(k * m for k, m in zip(row, mixed)) / 12037000)) for row in MIX_INV]
+        cur = sum(round(31 * x ** 0.25) << s for x, s in zip(lin, (0, 5, 10)))
+        err = lambda w: sum((p - q) ** 2 for p, q in zip(shown[w], t))  # noqa: E731
+        while True:
+            r, g, b = cur & 31, cur >> 5 & 31, cur >> 10
+            near = [r2 | g2 << 5 | b2 << 10 for r2 in (r - 1, r, r + 1) for g2 in (g - 1, g, g + 1)
+                    for b2 in (b - 1, b, b + 1) if 0 <= r2 < 32 and 0 <= g2 < 32 and 0 <= b2 < 32]
+            best = min(near, key=lambda w: (err(w), w != cur))
+            if best == cur:
+                break
+            cur = best
+        table.append(cur)
+    return table
+
+
+def port_colours(rom_path, port_path):
+    """Original screen colour -> the port screen colours it may show as, or None (DMG: Mesen
+    draws its own DMG palette, compare up to a colour mapping instead)."""
+    with open(rom_path, "rb") as f:
+        if not f.read(0x144)[0x143] & 0x80:
+            return None
+    with open(os.path.splitext(port_path)[0] + ".map.json") as f:
+        addr = int(json.load(f)["memory"]["colour"], 16) - 0x08000000
+    with open(port_path, "rb") as f:
+        table = struct.unpack("<32768H", f.read()[addr:addr + 0x10000])
+    expect = {}
+    for v in range(0x8000):
+        expect.setdefault(gbc_lcd(v), set()).add(gba_lcd(table[v]))
+    return expect
+
+
+def same_picture(gb_png, gba_png, tolerance=0, expect=None):
+    """GB 160x144 vs the port's letterboxed 240x160 at (40,8). With `expect` (port_colours) each
+    port pixel must show the original pixel's rgb555 through the port's colour table; without it
+    the pictures need only be equal up to a one-to-one colour mapping. Disagreeing pixels are
+    counted; up to `tolerance` of them (blink phases) still pass.
+    ponytail: Mesen's frame blending (BlendFrames, on by default) averages two frames, so a fade
+    caught mid-way fails the exact check even in phase; map blended pixels if a scenario needs it."""
     gw, gh, g = read_png(gb_png)
     aw, ah, a = read_png(gba_png)
     if (gw, gh) != (160, 144) or (aw, ah) != (240, 160):
         return False, f"unexpected sizes {gw}x{gh} / {aw}x{ah}"
+    if expect is not None:
+        bad = [(x, y) for y in range(144) for x in range(160) if a[y + 8][x + 40] not in expect.get(g[y][x], ())]
+        return len(bad) <= tolerance, f"{len(bad)} px differ, first at {bad[0]}" if bad else "exact colours"
     votes = {}
     for y in range(144):
         for x in range(160):
@@ -395,9 +464,10 @@ def cmd_verify(args):
         got = port["reads"].get(label)
         checks.append({"check": f"read:{label}", "ok": got == want, "original": want, "port": got})
     tolerance = scenario.get("shot_tolerance", 0)
+    expect = port_colours(args.rom, args.port)
     for label in orig["shots"]:
         ok, why = same_picture(os.path.join(args.out, "original", label + ".png"),
-                               os.path.join(args.out, "port", label + ".png"), tolerance)
+                               os.path.join(args.out, "port", label + ".png"), tolerance, expect)
         checks.append({"check": f"shot:{label}", "ok": ok, "detail": why})
     ok = all(c["ok"] for c in checks)
     with open(os.path.join(args.out, "verify.json"), "w") as f:
@@ -438,6 +508,8 @@ def main(argv=None):
             c.add_argument("--native-policy", choices=["strict"], default="strict",
                            help="strict: no interpreter, block on unresolved edges (hybrid is not implemented)")
             c.add_argument("--profile", action="store_true", help="link the sampling profiler (scripts/port_profile.py)")
+            c.add_argument("--colour", choices=["gbc", "raw"], default="gbc",
+                           help="gbc: CGB palettes adjusted to look on the GBA LCD as on the GBC LCD; raw: unchanged")
             c.add_argument("--allow-unresolved", action="store_true",
                            help="research build: build despite unresolved edges (they trap at run time)")
     args = p.parse_args(argv)

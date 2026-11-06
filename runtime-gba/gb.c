@@ -59,6 +59,8 @@ static u32 spread[256];                   // bit i (MSB first) → nibble i of a
 static OBJ_ATTR obj_shadow[40];           // copied to OAM in the VBlank ISR
 static uint16_t obj_pal[32];              // CGB OBJ palette RAM (OCPS/OCPD)
 
+extern const u16 gb_colour[0x8000];   // CGB rgb555 -> GBA palette value (gb2gba port --colour)
+
 static u16 dmg_shade(int s) { static const u16 c[4] = {0x7FFF, 0x5294, 0x294A, 0x0000}; return c[s & 3]; }
 
 static void ppu_tile_row(unsigned bank, unsigned off)   // off: 0..0x17FF tile data
@@ -83,8 +85,8 @@ static void ppu_palettes(void)
     for (int p = 0; p < 8; p++)
         for (int c = 0; c < 4; c++) {
             if (cgb_mode) {
-                pal_bg_mem[p * 16 + 1 + c] = bg_pal[p * 4 + c];
-                pal_obj_mem[p * 16 + c] = obj_pal[p * 4 + c];
+                pal_bg_mem[p * 16 + 1 + c] = gb_colour[bg_pal[p * 4 + c] & 0x7FFF];
+                pal_obj_mem[p * 16 + c] = gb_colour[obj_pal[p * 4 + c] & 0x7FFF];
             } else if (p < 2) {
                 pal_bg_mem[1 + c] = dmg_shade(io[0x47] >> (2 * c));
                 pal_obj_mem[p * 16 + c] = dmg_shade(io[0x48 + p] >> (2 * c));
@@ -392,8 +394,8 @@ static void palette_write(uint8_t *spec, uint16_t *ram, uint8_t v, int bg)  // B
     uint16_t *p = &ram[e];
     *p = (i & 1) ? (*p & 0x00FF) | v << 8 : (*p & 0xFF00) | v;
     if (*spec & 0x80) *spec = 0x80 | ((i + 1) & 0x3F);
-    if (bg) pal_bg_mem[(e >> 2) * 16 + 1 + (e & 3)] = *p;
-    else pal_obj_mem[(e >> 2) * 16 + (e & 3)] = *p;
+    if (bg) pal_bg_mem[(e >> 2) * 16 + 1 + (e & 3)] = gb_colour[*p & 0x7FFF];
+    else pal_obj_mem[(e >> 2) * 16 + (e & 3)] = gb_colour[*p & 0x7FFF];
 }
 
 // ---- page tables (see rd8/wr8) --------------------------------------------------------

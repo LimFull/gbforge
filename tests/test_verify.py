@@ -8,7 +8,7 @@ import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
-from gb2gba import read_png, same_picture  # noqa: E402
+from gb2gba import colour_table, gba_lcd, gbc_lcd, read_png, same_picture  # noqa: E402
 
 
 def paeth(a, b, c):
@@ -70,6 +70,31 @@ class VerifyTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("1 px differ, first at (70, 50)", why)
         self.assertTrue(same_picture(self.path("gb.png"), self.path("gba.png"), tolerance=1)[0])
+
+    def test_exact_colours(self):
+        # CGB: each port pixel must be the original pixel's rgb555 as the GBA LCD shows it
+        values = [0x7FFF, 0x0044, 0x03F3, 0x6160]
+        idx = [[(x * 7 + y * 3) % 4 for x in range(160)] for y in range(144)]
+        gb = [[gbc_lcd(values[i]) for i in row] for row in idx]
+        for y in range(144):
+            for x in range(160):
+                self.gba[y + 8][x + 40] = gba_lcd(values[idx[y][x]])
+        expect = {gbc_lcd(v): {gba_lcd(v)} for v in values}
+        write_png(self.path("gb.png"), gb)
+        write_png(self.path("gba.png"), self.gba)
+        self.assertEqual(same_picture(self.path("gb.png"), self.path("gba.png"), expect=expect), (True, "exact colours"))
+        self.gba[8 + 50][40 + 70] = gba_lcd(0x7FFE)   # palette-only difference, same structure
+        write_png(self.path("gba.png"), self.gba)
+        ok, why = same_picture(self.path("gb.png"), self.path("gba.png"), expect=expect)
+        self.assertFalse(ok)
+        self.assertIn("1 px differ, first at (70, 50)", why)
+
+    def test_colour_table_looks_like_gbc(self):
+        table = colour_table()
+        dist = lambda v, w: sum((a - b) ** 2 for a, b in zip(gba_lcd(w), gbc_lcd(v))) ** 0.5  # noqa: E731
+        self.assertLess(sum(dist(v, table[v]) for v in range(0x8000)) / 0x8000, 12)       # raw: 55
+        for v in (0x0044, 0x3CDA, 0x5718, 0x25AD, 0x7FFF):   # DQ1&2 colours inside the GBA LCD's gamut
+            self.assertLess(dist(v, table[v]), 6.5)
 
 
 if __name__ == "__main__":
