@@ -28,8 +28,17 @@ scripts/setup-check.sh                    # reports what is missing
 cmake -G Ninja -B build/core . && ninja -C build/core gbforge-core   # analyzer + code generator; fetches gb-recompiled (pinned)
 
 tools/gb2gba.py port tests/fixtures/tiny/tiny.gb --output out/tiny.gba   # the bundled test ROM
-open -a mGBA out/tiny.gba                 # macOS; elsewhere open it in mGBA
 ```
+
+Run the result in mGBA:
+
+| OS | Command |
+|---|---|
+| macOS | `open -a mGBA out/tiny.gba` (or `/Applications/mGBA.app/Contents/MacOS/mGBA out/tiny.gba`) |
+| Linux | `mgba-qt out/tiny.gba` (Debian/Ubuntu package `mgba-qt`), or `flatpak run io.mgba.mGBA out/tiny.gba` |
+| Windows | `"C:\Program Files\mGBA\mGBA.exe" out\tiny.gba`, or drag the `.gba` onto the mGBA window |
+
+On real hardware, copy the `.gba` to a flash cart (EZ-Flash, Everdrive GBA, etc.). Games keep their save in the cart's SRAM: the ROM carries the `SRAM_V113` marker, so carts and emulators pick 32 KiB SRAM.
 
 Then convert your own ROM by following [Converting a game](#converting-a-game). Static analysis alone rarely finds all of a commercial game's code, so record a play-through of the parts you want to run first.
 
