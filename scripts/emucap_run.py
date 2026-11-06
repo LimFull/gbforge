@@ -213,7 +213,7 @@ def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None,
             flush()
             n = len(result.setdefault("inject", []))
             if inject is None:  # original
-                run_to_pc(m, at, 120)
+                run_to_pc(m, at, 1200)
                 name = f"inject-{n}.bin"
                 with open(os.path.join(outdir, name), "wb") as f:
                     f.write(capture_state(m))

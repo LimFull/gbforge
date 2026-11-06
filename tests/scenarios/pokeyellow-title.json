@@ -1,0 +1,8 @@
+{
+  "description": "Pokemon Yellow (USA, Europe) sha256 8cbaa499397e4f1a...: boot, intro, title, main menu.",
+  "steps": [
+    {"step": 400}, {"shot": "intro"},
+    {"step": 600}, {"shot": "title"},
+    {"tap": ["start"], "press": 2, "after": 90}, {"shot": "menu"}
+  ]
+}

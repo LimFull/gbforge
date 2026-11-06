@@ -1,0 +1,603 @@
+{
+ "description": "Pokemon Yellow (USA, Europe) sha256 8cbaa499397e4f1a...: cart RAM cleared, title, new game, Oak's speech, preset names YELLOW/BLUE, the player's room, stairs down to the 1F room. Checkpoints at JoypadLowSensitivity (381E: its first instruction calls Joypad) or DelayFrame's RET (1E6E) every 180 frames. Then START > SAVE > YES and both 16 KiB halves of cart RAM (MBC5 banks 0-3) are read.",
+ "steps": [
+  {
+   "write": {
+    "memory_type": "gbCartRam",
+    "address": 0,
+    "fill": 0,
+    "length": 16384
+   }
+  },
+  {
+   "write": {
+    "memory_type": "gbCartRam",
+    "address": 16384,
+    "fill": 0,
+    "length": 16384
+   }
+  },
+  {
+   "step": 1000
+  },
+  {
+   "tap": [
+    "start"
+   ],
+   "press": 2,
+   "after": 90
+  },
+  {
+   "inject": {
+    "at": [
+     14366,
+     7790
+    ],
+    "every": 180
+   }
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 60
+  },
+  {
+   "step": 150
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 60
+  },
+  {
+   "step": 60
+  },
+  {
+   "shot": "m0"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 120
+  },
+  {
+   "shot": "o1"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 90
+  },
+  {
+   "shot": "o2"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 90
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 90
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 90
+  },
+  {
+   "shot": "o3"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "shot": "o4"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "shot": "o5"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "shot": "o6"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "shot": "o7"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "shot": "o8"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "shot": "o9"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "shot": "n1"
+  },
+  {
+   "tap": [
+    "down"
+   ],
+   "press": 2,
+   "after": 30
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 120
+  },
+  {
+   "shot": "n2"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "shot": "r1"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "shot": "r2"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "shot": "r3"
+  },
+  {
+   "step": 60
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "shot": "r4"
+  },
+  {
+   "tap": [
+    "down"
+   ],
+   "press": 2,
+   "after": 30
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 120
+  },
+  {
+   "shot": "r5"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "shot": "r6"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "shot": "e1"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 200
+  },
+  {
+   "shot": "e2"
+  },
+  {
+   "step": 200
+  },
+  {
+   "shot": "e3"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 200
+  },
+  {
+   "shot": "e4"
+  },
+  {
+   "step": 200
+  },
+  {
+   "shot": "e5"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "shot": "e6"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "shot": "e7"
+  },
+  {
+   "step": 300
+  },
+  {
+   "shot": "e8"
+  },
+  {
+   "step": 120
+  },
+  {
+   "shot": "room"
+  },
+  {
+   "tap": [
+    "right"
+   ],
+   "press": 8,
+   "after": 30
+  },
+  {
+   "tap": [
+    "right"
+   ],
+   "press": 8,
+   "after": 30
+  },
+  {
+   "shot": "walk1"
+  },
+  {
+   "tap": [
+    "up"
+   ],
+   "press": 8,
+   "after": 30
+  },
+  {
+   "tap": [
+    "up"
+   ],
+   "press": 8,
+   "after": 30
+  },
+  {
+   "shot": "walk2"
+  },
+  {
+   "tap": [
+    "right"
+   ],
+   "press": 8,
+   "after": 30
+  },
+  {
+   "tap": [
+    "right"
+   ],
+   "press": 8,
+   "after": 30
+  },
+  {
+   "shot": "w3"
+  },
+  {
+   "tap": [
+    "up"
+   ],
+   "press": 8,
+   "after": 30
+  },
+  {
+   "shot": "w4"
+  },
+  {
+   "tap": [
+    "up"
+   ],
+   "press": 8,
+   "after": 30
+  },
+  {
+   "tap": [
+    "up"
+   ],
+   "press": 8,
+   "after": 30
+  },
+  {
+   "step": 120
+  },
+  {
+   "shot": "f1"
+  },
+  {
+   "tap": [
+    "down"
+   ],
+   "press": 8,
+   "after": 30
+  },
+  {
+   "tap": [
+    "down"
+   ],
+   "press": 8,
+   "after": 30
+  },
+  {
+   "shot": "f2"
+  },
+  {
+   "tap": [
+    "start"
+   ],
+   "press": 2,
+   "after": 60
+  },
+  {
+   "shot": "menu"
+  },
+  {
+   "tap": [
+    "down"
+   ],
+   "press": 2,
+   "after": 20
+  },
+  {
+   "tap": [
+    "down"
+   ],
+   "press": 2,
+   "after": 20
+  },
+  {
+   "tap": [
+    "down"
+   ],
+   "press": 2,
+   "after": 20
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 100
+  },
+  {
+   "shot": "save_q"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 300
+  },
+  {
+   "shot": "save_yesno"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 400
+  },
+  {
+   "shot": "saving"
+  },
+  {
+   "tap": [
+    "a"
+   ],
+   "press": 2,
+   "after": 120
+  },
+  {
+   "shot": "saved"
+  },
+  {
+   "read": "cart_ram_lo",
+   "memory_type": "gbCartRam",
+   "address": 0,
+   "length": 16384
+  },
+  {
+   "read": "cart_ram_hi",
+   "memory_type": "gbCartRam",
+   "address": 16384,
+   "length": 16384
+  }
+ ]
+}

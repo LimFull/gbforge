@@ -5,6 +5,7 @@
 ⚠️ **Status: Phase 4 (compatibility breadth) in progress.** The engine is generic: nothing in the analyzer, code generator or runtime is keyed to a particular game. Its hardware coverage is checked against these targets (see [Compatibility](#compatibility)):
 
 - **Homebrew test ROM** (DMG, in this repo): runs as a strict native build and matches the original.
+- **Pokémon Yellow** (MBC5, 32 KiB cart RAM, second commercial game): title → new game → Oak's speech → the player's room → stairs → save, with no game-specific code. Walking, map changes, menus and the 32 KiB save match the original; screens caught mid-text or mid-fade are a frame apart.
 - **Public test ROMs** (Phase 4): dmg-acid2 and the mooneye MBC1/2/5 tests match the original, apart from MBC1 multicart and mode-1 wiring. See [reports/phase4.md](reports/phase4.md).
 - **Dragon Quest I&II** (GBC, first commercial target): plays title → field → battle → save → continue on the GBA. Compared against the original from identical checkpoints, 22 of 25 checks match, with screens compared down to colour values. The remaining 3 come from a one-frame offset after LCD-off scene loads. It is still a research build: unresolved paths trap instead of using an interpreter.
 

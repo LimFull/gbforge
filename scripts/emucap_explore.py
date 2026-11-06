@@ -56,6 +56,7 @@ def serve(rom, prefix, outdir):
                 try:
                     for s in req:
                         if "quit" in s:
+                            save()        # steps sent with quit in the same batch count too
                             conn.sendall(b"bye\n")
                             return
                         do(s)

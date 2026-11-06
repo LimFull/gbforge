@@ -609,8 +609,9 @@ static void cart_init(void)
     }
 }
 
-static uint8_t cart_read(uint16_t a)      // A000-BFFF pages that are not mapped directly
+static uint8_t cart_read(uint16_t a)      // A000-BFFF from the slow path (constant addresses come here too)
 {
+    if (gb_rpage[a >> 8]) return gb_rpage[a >> 8][a & 0xFF];
     if (!ram_enable) return 0xFF;
     if (mbc == MBC_2) return 0xF0 | SRAM8[a & 0x1FF];  // 512 nibbles, mirrored
     if (mbc == MBC_3 && ram_bank >= 8 && ram_bank <= 0x0C) return rtc_latched[ram_bank - 8];
@@ -619,6 +620,7 @@ static uint8_t cart_read(uint16_t a)      // A000-BFFF pages that are not mapped
 
 static void cart_write(uint16_t a, uint8_t v)
 {
+    if (gb_wpage[a >> 8]) { gb_wpage[a >> 8][a & 0xFF] = v; return; }
     if (!ram_enable) return;
     if (mbc == MBC_2) SRAM8[a & 0x1FF] = v & 0x0F;
     else if (mbc == MBC_3 && ram_bank >= 8 && ram_bank <= 0x0C) rtc_write(ram_bank - 8, v);
