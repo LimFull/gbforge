@@ -2,9 +2,10 @@
 
 > A tool that statically analyzes and recompiles the GB CPU code in `.gb` / `.gbc` ROMs into a `.gba` that **runs natively on real GBA hardware**.
 
-⚠️ **Status: Phase 3 (GBC compatibility) in progress.** The engine is generic: nothing in the analyzer, code generator or runtime is keyed to a particular game. Its hardware coverage so far is what the two validation targets need (see [Compatibility](#compatibility)):
+⚠️ **Status: Phase 4 (compatibility breadth) in progress.** The engine is generic: nothing in the analyzer, code generator or runtime is keyed to a particular game. Its hardware coverage is checked against these targets (see [Compatibility](#compatibility)):
 
 - **Homebrew test ROM** (DMG, in this repo): runs as a strict native build and matches the original.
+- **Public test ROMs** (Phase 4): dmg-acid2 and the mooneye MBC1/2/5 tests match the original, apart from MBC1 multicart and mode-1 wiring. See [reports/phase4.md](reports/phase4.md).
 - **Dragon Quest I&II** (GBC, first commercial target): plays title → field → battle → save → continue on the GBA. Compared against the original from identical checkpoints, 22 of 25 checks match, with screens compared down to colour values. The remaining 3 come from a one-frame offset after LCD-off scene loads. It is still a research build: unresolved paths trap instead of using an interpreter.
 
 Details: [reports/phase3.md](reports/phase3.md).
@@ -51,15 +52,18 @@ What the runtime covers today. A game that uses something in the right-hand colu
 
 | Area | Supported | Not yet |
 |---|---|---|
-| Cartridge | ROM only; MBC5 with one 8 KiB battery-backed RAM bank | MBC1/2/3 (incl. the MBC3 clock), MBC5 RAM banking. `port` refuses these with exit code 4 |
+| Cartridge | ROM only, MBC1, MBC2, MBC3 with its clock, MBC5; cart RAM up to 32 KiB in GBA SRAM | MBC1 mode 1 showing bank 20/40/60 at 0000-3FFF (≥1 MiB carts, multicarts), MBC6/7, HuC, camera, more than 32 KiB cart RAM. `port` refuses unsupported cartridges with exit code 4. The MBC3 clock runs only while the game runs |
 | Model | DMG, CGB (palettes, VRAM/WRAM banks, HDMA) | CGB double speed (runs at normal speed) |
-| Video | BG, window, 8×8/8×16 sprites, DMG/CGB palettes, CGB colours adjusted for the GBA LCD (`--colour`) | BG priority bit, sprites behind BG, 10-sprites-per-line limit, mid-frame register changes (split status bars, wave effects) |
-| Sound | Register read-back and channel status (sound drivers keep running) | Audio output (all ports are silent) |
+| Video | BG, window, 8×8/8×16 sprites, DMG/CGB palettes, CGB colours adjusted for the GBA LCD (`--colour`). Per-line changes of LCDC, SCX/SCY and WX/WY, including the window's own line counter. Sprites behind BG (OAM bit 7), DMG sprite order by X, the 10-sprites-per-line limit | CGB tiles over sprites (BG attribute bit 7), palette changes within a frame. A sprite takes its size from its top line, and the sprite limit hides only sprites it drops on every line they cover |
+| Sound | All four channels, on the GBA's own copy of the GB sound hardware | — |
 | CPU / timing | All documented SM83 opcodes, interrupts, timer, DIV, STAT/LYC, HALT, OAM DMA | Cycle-exact interrupt entry. Timing is close to the original but not instruction-exact |
-| Code in RAM | The standard HRAM OAM-DMA routine and one I/O-wait idiom, replaced by native hooks | Any other routine executed from RAM traps |
+| Code in RAM | Code copied from ROM into RAM, found from the recorded run and compiled at its RAM address, plus the HRAM OAM-DMA routine | Code generated or patched in RAM after copying traps |
 | Code coverage | Static analysis plus the code a recorded play-through executed (`--cdl`) | Paths neither found statically nor played are unresolved: the strict gate blocks the build, and `--allow-unresolved` builds them as traps |
 
-Public test ROMs: `tests/fixtures/acid2` holds dmg-acid2 and cgb-acid2 (MIT). Both build and run, but their pictures do not match the original yet; they exercise the video gaps above. Run the conversion steps below on them, using `tests/scenarios/{dmg,cgb}-acid2.json` as the route.
+Public test ROMs:
+- `tests/fixtures/acid2` holds dmg-acid2 and cgb-acid2 (MIT). dmg-acid2 matches the original. cgb-acid2 differs only in the eyes, which use CGB BG-over-sprite priority.
+- `scripts/fetch_test_roms.sh` downloads mooneye-test-suite (MIT, pinned by SHA-256). It is too large for git.
+- `scripts/test_roms.py ROM...` records, ports and verifies each one against its original. Results are in [reports/phase4.md](reports/phase4.md).
 
 For a new game, check the cartridge type first (`gb2gba inspect`; `port` stops with exit code 4 on an unsupported one) and expect to record a play-through that covers the parts of the game you want to run.
 
@@ -119,6 +123,9 @@ tools/gb2gba.py port tests/fixtures/tiny/tiny.gb --output out/tiny.gba
 set -a; . ./local.env; set +a
 tools/gb2gba.py verify tests/fixtures/tiny/tiny.gb out/tiny.gba --scenario tests/scenarios/tiny-diff.json --out build/verify/tiny
 
+scripts/fetch_test_roms.sh                # mooneye-test-suite into build/test-roms (pinned)
+scripts/test_roms.py tests/fixtures/acid2/*.gb* build/test-roms/mts-*/emulator-only/mbc*/*.gb
+
 make -C tests/fixtures/tiny               # rebuild the test ROM (RGBDS)
 scripts/dkarm.sh make -C examples/hello-gba
 scripts/emucap_run.py examples/hello-gba/hello.gba tests/scenarios/hello-gba-smoke.json build/smoke/hello
@@ -133,6 +140,7 @@ How a port works: `gbforge-core` links gb-recompiled's analyzer and turns each a
 
 - **Determinism**: Mesen fills GB RAM with random values at power-on. Original runs clear WRAM, HRAM and wave RAM before the first instruction, as the port starts, so a scenario replays identically.
 - **Checkpoints**: `{"inject": {"at": PC, "every": N}}`. On the original, the run stops at PC and saves the whole GB state. PC must be a compiled entry outside interrupt handlers, such as the main loop's idle wait. On the port, the next GB frame tick loads that state into `gb_inject` and restarts native code at PC. With `every`, this repeats before the first input after every N frames. Port timing is close to the original but not cycle-exact, and games that run an RNG in their idle loop (DQ1&2 does) drift apart within hundreds of frames, so checkpoints restart the comparison from identical state.
+- **Speed**: emucap runs Mesen unthrottled, since scenarios count frames, not wall time. On a port, steps and taps between two observations (shot, read, checkpoint, `until`) become one plan. The taps go into the port's input schedule (`gb_script`: keys by GB frame, applied at the frame tick). The emulator then runs to the plan's last frame in one go and stops on a write breakpoint on the GB frame counter. The port is therefore always paused at a frame tick, however much it lags. The DQ1&2 P3 comparison takes about 5.5 minutes (previously 15-17). `--reuse-original`, and `scripts/test_roms.py` by default, reuse the original's recorded run.
 - **Screens**: Mesen applies different LCD colour models to GBC and GBA output. For CGB games, `verify` inverts both models and requires every port pixel to be the original pixel's colour value through the port's colour table, so palette-only differences fail. Pixels averaged by Mesen's frame blending (mid-fade) cannot be inverted and count as differences. DMG games are compared up to a one-to-one colour mapping. `shot_tolerance` in a scenario allows a few pixels for blink phases.
 
 ## Exit codes

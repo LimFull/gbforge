@@ -2,7 +2,7 @@
 //
 // Compat renderer: GB VRAM/OAM/palette writes are mirrored straight into GBA BG/OBJ hardware
 // (see the PPU section), so there is no per-frame copy besides OAM. The 160x144 picture is
-// letterboxed at (40,8). ponytail: no audio yet.
+// letterboxed at (40,8). Sound goes to the GBA's own copy of the GB sound channels.
 #include <setjmp.h>
 #include <string.h>
 #include <tonc.h>
@@ -44,16 +44,26 @@ static void update_irq(void) { gb.irq = gb.ime && (IE & IF & 0x1F); }
 
 // ---- PPU (compat) -------------------------------------------------------------------
 //
-// GBA layout: BG0 = GB background, BG1 = GB window (inside WIN0), OBJ = GB sprites.
-// BG tiles: charblocks 0-1 (GB VRAM bank 0 tile t → t, bank 1 → 512 + t), colour indices 1-4
-// so every BG pixel is opaque with its own palette's colour 0. OBJ tiles: charblock 4
+// GBA layout: BG0/BG1 = GB background/window colours 1-3 (priority 2), BG2/BG3 = their colour 0
+// (priority 3, every tile the solid tile 1023 in the tile's palette), so a GB sprite behind the
+// background (OAM bit 7, GBA priority 3) shows over colour 0 only; other sprites use priority 2.
+// The GB window is BG1/BG3 inside WIN0, the rest of the GB screen BG0/BG2 inside WIN1.
+// BG tiles: charblocks 0-1 (GB VRAM bank 0 tile t → t, bank 1 → 512 + t), GB colour c → index c
+// (0 transparent); palette entry 4 holds colour 0 for the solid tile. OBJ tiles: charblock 4
 // (GB 0x8000-0x8FFF tiles, bank 0 → t, bank 1 → 256 + t), indices 0-3 (0 transparent).
-// Maps: GB 9800/9C00 → screenblocks 28/29, CGB attributes folded into each entry.
-// ponytail: no BG-over-OBJ priority (attr bit 7, OBJ bit 7), no 10-sprites-per-line limit,
-// register changes apply immediately (no mid-frame raster splits).
+// Maps: GB 9800/9C00 → screenblocks 28/29 with 8000 tile addressing, 26/27 with 8800 and 24/25
+// solid, CGB attributes folded into each entry, so LCDC can pick map and addressing per line
+// (see raster). Screenblock 30: DMG lines with BG off (solid tile in palette 15, white).
+// All four BG layers stay enabled: the GBA shows a layer only some lines after DISPCNT enables
+// it, so the window comes and goes through WIN0H and a DMG BG switched off through its map.
+// ponytail: no CGB BG-over-OBJ priority (attr bit 7: needs a fifth layer); a sprite's size comes
+// from its top line, and the 10-sprites-per-line limit hides only sprites it drops on every line
+// they cover; palettes change for the whole frame.
 
-#define SB_MAP0 28
-#define SB_MAP1 29
+#define SB_MAP0 28                        // + 1: 9C00; - 2: 8800 addressing
+#define SB_SOLID 24                       // + 1: 9C00
+#define SB_BLANK 30
+#define TILE_BLANK 1023
 #define OBJ_TILES ((u32 *)tile_mem[4])
 static u32 spread[256];                   // bit i (MSB first) → nibble i of a 4bpp row
 static OBJ_ATTR obj_shadow[40];           // copied to OAM in the VBlank ISR
@@ -68,16 +78,18 @@ static void ppu_tile_row(unsigned bank, unsigned off)   // off: 0..0x17FF tile d
     unsigned row = off & ~1u;
     const uint8_t *v = vram + bank * 0x2000;
     u32 px = spread[v[row]] | spread[v[row + 1]] << 1;
-    ((u32 *)tile_mem[0])[(bank * 0x2000 + row) >> 1] = px + 0x11111111;
+    ((u32 *)tile_mem[0])[(bank * 0x2000 + row) >> 1] = px;
     if (off < 0x1000) OBJ_TILES[(bank * 0x1000 + row) >> 1] = px;
 }
 
 static void ppu_map_write(unsigned off)   // off: 0..0x7FF within 9800-9FFF
 {
     uint8_t idx = vram[0x1800 + off], attr = cgb_mode ? vram[0x3800 + off] : 0;
-    unsigned t = (LCDC & 0x10) ? idx : (idx < 128 ? 256 + idx : idx);  // 8000 vs 8800 addressing
-    se_mem[off < 0x400 ? SB_MAP0 : SB_MAP1][off & 0x3FF] = (t + ((attr & 0x08) ? 512 : 0))
-        | ((attr & 0x20) ? SE_HFLIP : 0) | ((attr & 0x40) ? SE_VFLIP : 0) | SE_PALBANK(attr & 7);
+    unsigned e = ((attr & 0x08) ? 512 : 0) | ((attr & 0x20) ? SE_HFLIP : 0) | ((attr & 0x40) ? SE_VFLIP : 0)
+        | SE_PALBANK(attr & 7), sb = SB_MAP0 + (off >= 0x400);
+    se_mem[sb][off & 0x3FF] = e | idx;                              // 8000 addressing
+    se_mem[sb - 2][off & 0x3FF] = e | (idx < 128 ? 256 + idx : idx);  // 8800: tiles 0-127 at 9000
+    se_mem[SB_SOLID + (off >= 0x400)][off & 0x3FF] = TILE_BLANK | SE_PALBANK(attr & 7);
 }
 
 static void ppu_palettes(void)
@@ -85,21 +97,25 @@ static void ppu_palettes(void)
     for (int p = 0; p < 8; p++)
         for (int c = 0; c < 4; c++) {
             if (cgb_mode) {
-                pal_bg_mem[p * 16 + 1 + c] = gb_colour[bg_pal[p * 4 + c] & 0x7FFF];
+                pal_bg_mem[p * 16 + (c ? c : 4)] = gb_colour[bg_pal[p * 4 + c] & 0x7FFF];
                 pal_obj_mem[p * 16 + c] = gb_colour[obj_pal[p * 4 + c] & 0x7FFF];
             } else if (p < 2) {
-                pal_bg_mem[1 + c] = dmg_shade(io[0x47] >> (2 * c));
+                pal_bg_mem[c ? c : 4] = dmg_shade(io[0x47] >> (2 * c));
                 pal_obj_mem[p * 16 + c] = dmg_shade(io[0x48 + p] >> (2 * c));
             }
         }
 }
 
+static uint8_t obj_lcdc[144] EWRAM_BSS;   // LCDC per line of the last frame (raster), once one is done
+static uint8_t obj_lines;
+
 static void ppu_obj(unsigned i)
 {
     const uint8_t *o = &oam[i * 4];
     OBJ_ATTR *d = &obj_shadow[i];
-    unsigned tall = LCDC & 0x04, attr = o[3];
-    if (!(LCDC & 0x02) || o[0] == 0 || o[0] >= 160 || o[1] == 0 || o[1] >= 168) {
+    unsigned top = o[0] < 16 ? 0 : o[0] - 16 > 143 ? 143 : o[0] - 16;
+    unsigned lcdc = obj_lines ? obj_lcdc[top] : LCDC, tall = lcdc & 0x04, attr = o[3];
+    if (o[0] == 0 || o[0] >= 160 || o[1] == 0 || o[1] >= 168) {
         d->attr0 = ATTR0_HIDE;
         return;
     }
@@ -107,7 +123,8 @@ static void ppu_obj(unsigned i)
     unsigned pal = cgb_mode ? attr & 7 : (attr >> 4) & 1;
     d->attr0 = ((o[0] - 16 + 8) & 0xFF) | (tall ? ATTR0_TALL : ATTR0_SQUARE);
     d->attr1 = ((o[1] - 8 + 40) & 0x1FF) | ((attr & 0x20) ? ATTR1_HFLIP : 0) | ((attr & 0x40) ? ATTR1_VFLIP : 0);
-    d->attr2 = tile | ATTR2_PALBANK(pal);
+    unsigned behind = (attr & 0x80) && !(cgb_mode && !(lcdc & 0x01));  // CGB LCDC.0 off: sprites on top
+    d->attr2 = tile | ATTR2_PALBANK(pal) | ATTR2_PRIO(behind ? 3 : 2);
 }
 
 static void ppu_all_obj(void)
@@ -115,36 +132,6 @@ static void ppu_all_obj(void)
     for (unsigned i = 0; i < 40; i++) ppu_obj(i);
 }
 
-static int ppu_window_on(void) { return (LCDC & 0x20) && io[0x4B] <= 166 && io[0x4A] <= 143; }
-
-static void ppu_dispcnt(void)
-{
-    if (!(LCDC & 0x80)) { REG_DISPCNT = DCNT_BLANK; return; }
-    unsigned bg = cgb_mode || (LCDC & 0x01);  // CGB: bit 0 is priority, BG always drawn
-    REG_DISPCNT = DCNT_MODE0 | DCNT_OBJ | DCNT_OBJ_1D | DCNT_WIN1 | (bg ? DCNT_BG0 : 0)
-        | ((bg && ppu_window_on()) ? DCNT_BG1 | DCNT_WIN0 : 0);
-}
-
-static void ppu_scroll(void)
-{
-    REG_BG0HOFS = io[0x43] - 40;
-    REG_BG0VOFS = io[0x42] - 8;
-    unsigned wx = io[0x4B] < 7 ? 7 : io[0x4B], wy = io[0x4A];
-    REG_BG1HOFS = -(40 + (int)wx - 7);
-    REG_BG1VOFS = -(8 + (int)wy);
-    REG_WIN0H = (40 + wx - 7) << 8 | 200;
-    REG_WIN0V = (8 + wy) << 8 | 152;
-}
-
-static void ppu_lcdc(uint8_t old)
-{
-    if ((old ^ LCDC) & 0x10)
-        for (unsigned off = 0; off < 0x800; off++) ppu_map_write(off);
-    if ((old ^ LCDC) & 0x06) ppu_all_obj();
-    REG_BG0CNT = BG_CBB(0) | BG_SBB((LCDC & 0x08) ? SB_MAP1 : SB_MAP0) | BG_PRIO(1);
-    REG_BG1CNT = BG_CBB(0) | BG_SBB((LCDC & 0x40) ? SB_MAP1 : SB_MAP0) | BG_PRIO(0);
-    ppu_dispcnt();
-}
 
 static void ppu_init(void)
 {
@@ -157,12 +144,15 @@ static void ppu_init(void)
     for (int i = 0; i < 40; i++) obj_shadow[i].attr0 = ATTR0_HIDE;
     REG_WIN1H = 40 << 8 | 200;            // WIN1: the whole GB screen; WIN0 (higher priority): GB window
     REG_WIN1V = 8 << 8 | 152;
-    REG_WININ = (WIN_BG1 | WIN_OBJ) | (WIN_BG0 | WIN_OBJ) << 8;
+    REG_WIN0V = 8 << 8 | 152;             // the window's lines come from WIN0H per line (raster)
+    for (int i = 0; i < 8; i++) ((u32 *)tile_mem[0])[TILE_BLANK * 8 + i] = 0x44444444;
+    for (int i = 0; i < 1024; i++) se_mem[SB_BLANK][i] = TILE_BLANK | SE_PALBANK(15);
+    if (!cgb_mode) pal_bg_mem[15 * 16 + 4] = CLR_WHITE;
+    REG_WININ = (WIN_BG1 | WIN_BG3 | WIN_OBJ) | (WIN_BG0 | WIN_BG2 | WIN_OBJ) << 8;
     REG_WINOUT = 0;
     pal_bg_mem[0] = 0;                    // letterbox border
     for (unsigned t = 0; t < 0x1800; t += 2) ppu_tile_row(0, t), ppu_tile_row(1, t);
-    ppu_lcdc(0);
-    ppu_scroll();
+    for (unsigned off = 0; off < 0x800; off++) ppu_map_write(off);
     ppu_palettes();
 }
 
@@ -208,10 +198,15 @@ static void raise_irq(unsigned bit, uint32_t at)
     IF |= 1u << bit;
 }
 
+static void raster_frame(void);
+
 static uint32_t lcd_pos(void)             // cycles into the current LCD frame
 {
     uint32_t f = gb.cyc - frame_start;
-    while (f >= FRAME) { frame_start += FRAME; f -= FRAME; vblank_line_done = lyc_done = 0; hblank_line = 0; }
+    while (f >= FRAME) {
+        if (!vblank_line_done) raster_frame();
+        frame_start += FRAME; f -= FRAME; vblank_line_done = lyc_done = 0; hblank_line = 0;
+    }
     if (f >= LINE) lcd_first_line = 0;
     return f;
 }
@@ -291,9 +286,16 @@ static void sync_real_time(void)          // one GB frame of time done: don't ru
     inject_poll();
 }
 
+// Verification input schedule (scripts/emucap_run.py): gb_keys values the tool queues by GB frame,
+// applied at that frame's tick, so a scenario runs from one observation to the next without the
+// emulator stopping at every button change. Frame 0 never ticks: unused entries.
+volatile struct { uint32_t frame, keys; } gb_script[32] EWRAM_BSS;
+
 static void pace(void)                    // a scenario frame: count it, then sync real time
 {
     gb_paced++;
+    for (unsigned i = 0; i < 32; i++)
+        if (gb_script[i].frame == gb_paced) gb_keys = gb_script[i].keys;
     sync_real_time();
 }
 
@@ -321,6 +323,121 @@ static void schedule(void)
     gb_next_event = next;
 }
 
+// ---- raster: display registers per line ------------------------------------------------
+// The port's GB code does not run in step with the GBA's scan-out, so registers a game changes
+// mid-frame (split status bars, window toggles, wave effects, map switches) are recorded per GB
+// line. At the GB frame's VBlank its lines become GBA register values, and from the next GBA
+// VBlank on, HBlank DMA 0-3 loads them line by line: BG0-3 scroll, DISPCNT, BG0-3CNT, WIN0H
+// (separate channels so DISPSTAT, between DISPCNT and BG0CNT, is never rewritten).
+typedef struct { uint8_t lcdc, scy, scx, wy, wx; } LineRegs;
+typedef struct { u16 hv[8]; } GbaScroll;  // BG0HOFS..BG3VOFS
+typedef struct { GbaScroll scroll[161]; u32 bgcnt[161][2]; u16 dispcnt[161], win0h[161]; } RasterTable;  // [160]: DMA reads one past line 159
+static LineRegs rcur, rline[144] EWRAM_BSS;  // latest values; values each line of the frame being built starts with
+static uint8_t rnext, rsplit = 1, rlast_split = 1;  // first unfilled line; a split this frame / in the shown table
+static RasterTable rtab[2] EWRAM_BSS;
+static volatile uint8_t rshow, rready;    // table the GBA shows; a newer one is complete
+
+static void raster_write(void)            // after a write to LCDC, SCY, SCX, WY or WX
+{
+    unsigned l = 0;
+    if (LCDC & 0x80) {
+        uint32_t f = lcd_pos(), line = line_of(f);
+        l = line >= 144 ? (vblank_line_done ? 0 : 144) : line + (f - line * LINE >= MODE3_AT);
+        if (l < rnext) l = rnext;
+        while (rnext < l) rline[rnext++] = rcur;
+        if (l > 0 && l < 144) rsplit = 1;
+    }
+    rcur = (LineRegs){LCDC, io[0x42], io[0x43], io[0x4A], io[0x4B]};
+}
+
+static uint64_t obj_dropped;              // sprites the 10-per-line limit drops on every line they cover
+
+static void obj_limit(void)               // the GB draws the first 10 sprites (OAM order) on each line
+{
+    uint8_t count[144] = {0};
+    uint64_t seen = 0, drawn = 0;
+    for (unsigned i = 0; i < 40; i++) {
+        int y0 = oam[i * 4] - 16, top = y0 < 0 ? 0 : y0 > 143 ? 143 : y0;
+        int h = (rline[top].lcdc & 0x04) ? 16 : 8;
+        for (int y = y0 < 0 ? 0 : y0; y < y0 + h && y < 144; y++) {
+            seen |= 1ull << i;
+            if (count[y]++ < 10) drawn |= 1ull << i;
+        }
+    }
+    obj_dropped = seen & ~drawn;
+}
+
+static void raster_frame(void)            // the GB frame's lines are complete: build its GBA table
+{
+    while (rnext < 144) rline[rnext++] = rcur;
+    rnext = 0;
+    obj_limit();
+    static LineRegs shown;                // line 0 of the last table built from an unsplit frame
+    if (!rsplit && !rlast_split && !memcmp(&rline[0], &shown, sizeof shown)) return;  // nothing changed
+    rlast_split = rsplit;
+    rsplit = 0;
+    shown = rline[0];
+    rready = 0;
+    RasterTable *t = &rtab[rshow ^ 1];
+    unsigned wl = 0, trig = 0;
+    for (unsigned l = 0; l < 144; l++) {
+        const LineRegs *r = &rline[l];
+        unsigned bg = cgb_mode || (r->lcdc & 0x01), wx = r->wx < 7 ? 7 : r->wx;
+        trig |= l == r->wy;               // the window starts on the line LY = WY, once per frame
+        unsigned win = bg && (r->lcdc & 0x20) && trig && r->wx <= 166;
+        unsigned mode = (r->lcdc & 0x10) ? 0 : 2, bgmap = (r->lcdc >> 3) & 1, winmap = (r->lcdc >> 6) & 1;
+        t->dispcnt[8 + l] = DCNT_MODE0 | DCNT_OBJ_1D | DCNT_WIN0 | DCNT_WIN1 | DCNT_BG0 | DCNT_BG1 | DCNT_BG2
+            | DCNT_BG3 | ((r->lcdc & 0x02) ? DCNT_OBJ : 0);
+        t->bgcnt[8 + l][0] = BG_PRIO(2) | BG_SBB(bg ? SB_MAP0 + bgmap - mode : SB_BLANK)
+            | (BG_PRIO(2) | BG_SBB(SB_MAP0 + winmap - mode)) << 16;
+        t->bgcnt[8 + l][1] = BG_PRIO(3) | BG_SBB(bg ? SB_SOLID + bgmap : SB_BLANK) | (BG_PRIO(3) | BG_SBB(SB_SOLID + winmap)) << 16;
+        u16 *hv = t->scroll[8 + l].hv;
+        hv[0] = hv[4] = r->scx - 40;
+        hv[1] = hv[5] = r->scy - 8;
+        hv[2] = hv[6] = -(40 + (int)wx - 7);
+        hv[3] = hv[7] = wl - (8 + l);     // the window's own line counter, not LY - WY
+        t->win0h[8 + l] = win ? (40 + wx - 7) << 8 | 200 : 0;  // empty: no window on this line
+        wl += win;
+        obj_lcdc[l] = r->lcdc;
+    }
+    obj_lines = 1;
+    ppu_all_obj();                        // sprite size and priority follow their top line
+    for (unsigned y = 0; y < 161; y++) {      // letterbox lines repeat the nearest GB line
+        unsigned from = y < 8 ? 8 : y > 151 ? 151 : y;
+        if (from == y) continue;
+        t->scroll[y] = t->scroll[from]; t->dispcnt[y] = t->dispcnt[from];
+        t->bgcnt[y][0] = t->bgcnt[from][0]; t->bgcnt[y][1] = t->bgcnt[from][1]; t->win0h[y] = t->win0h[from];
+    }
+    rready = 1;
+}
+
+static void raster_reset(void)            // registers replaced wholesale (power-on, state injection)
+{
+    rnext = 0;
+    rsplit = 1;
+    raster_write();
+    raster_frame();
+}
+
+static void raster_stop(void) { REG_DMA0CNT = REG_DMA1CNT = REG_DMA2CNT = REG_DMA3CNT = 0; }
+
+static void raster_vblank(void)           // GBA VBlank: line 0 now, the rest by HBlank DMA
+{
+    raster_stop();
+    if (!(LCDC & 0x80)) { REG_DISPCNT = DCNT_BLANK; return; }
+    if (rready) rshow ^= 1, rready = 0;
+    const RasterTable *t = &rtab[rshow];
+    for (int i = 0; i < 4; i++) ((vu32 *)&REG_BG0HOFS)[i] = ((const u32 *)t->scroll[0].hv)[i];
+    REG_DISPCNT = t->dispcnt[0];
+    ((vu32 *)&REG_BG0CNT)[0] = t->bgcnt[0][0];
+    ((vu32 *)&REG_BG0CNT)[1] = t->bgcnt[0][1];
+    REG_WIN0H = t->win0h[0];
+    REG_DMA0SAD = (u32)&t->scroll[1]; REG_DMA0DAD = (u32)&REG_BG0HOFS; REG_DMA0CNT = DMA_HDMA | DMA_32 | 4;
+    REG_DMA1SAD = (u32)&t->dispcnt[1]; REG_DMA1DAD = (u32)&REG_DISPCNT; REG_DMA1CNT = DMA_HDMA | DMA_16 | 1;
+    REG_DMA2SAD = (u32)&t->bgcnt[1]; REG_DMA2DAD = (u32)&REG_BG0CNT; REG_DMA2CNT = DMA_HDMA | DMA_32 | 2;
+    REG_DMA3SAD = (u32)&t->win0h[1]; REG_DMA3DAD = (u32)&REG_WIN0H; REG_DMA3CNT = DMA_HDMA | DMA_16 | 1;
+}
+
 HOT static void run_events(void)
 {
     uint32_t now = gb.cyc;
@@ -339,6 +456,7 @@ HOT static void run_events(void)
             pace();
         }
         if (!vblank_line_done && f >= 144 * LINE + LINE_IRQ_AT) {
+            raster_frame();
             vblank_line_done = 1;
             raise_irq(0, base + 144 * LINE + LINE_IRQ_AT + VBLANK_IRQ_DELAY);
             if (io[0x41] & 0x10) raise_irq(1, base + 144 * LINE + LINE_IRQ_AT + VBLANK_IRQ_DELAY);
@@ -394,7 +512,7 @@ static void palette_write(uint8_t *spec, uint16_t *ram, uint8_t v, int bg)  // B
     uint16_t *p = &ram[e];
     *p = (i & 1) ? (*p & 0x00FF) | v << 8 : (*p & 0xFF00) | v;
     if (*spec & 0x80) *spec = 0x80 | ((i + 1) & 0x3F);
-    if (bg) pal_bg_mem[(e >> 2) * 16 + 1 + (e & 3)] = gb_colour[*p & 0x7FFF];
+    if (bg) pal_bg_mem[(e >> 2) * 16 + ((e & 3) ? (e & 3) : 4)] = gb_colour[*p & 0x7FFF];
     else pal_obj_mem[(e >> 2) * 16 + (e & 3)] = gb_colour[*p & 0x7FFF];
 }
 
@@ -422,14 +540,89 @@ static void map_vram(void)                // reads direct from the shadow; write
     map_pages(0x80, 32, vram + (cgb_mode && (io[0x4F] & 1)) * 0x2000, 0);
 }
 
-static void map_cart_ram(void)
+// ---- cartridge: MBC1/2/3/5, cart RAM in GBA SRAM, MBC3 clock ----------------------------
+
+enum { MBC_NONE, MBC_1, MBC_2, MBC_3, MBC_5 };
+static uint8_t mbc, mbc_lo = 1, mbc_hi, mbc_mode, ram_bank, rtc_latch_arm;
+static uint32_t ram_size;                 // bytes of cart RAM (gb2gba port refuses more than 32 KiB)
+#define SRAM8 ((volatile uint8_t *)MEM_SRAM)  // SRAM has an 8-bit bus
+
+static void map_cart_ram(void)            // banked RAM maps directly; the rest takes the slow path
 {
-    unsigned pages = gb_rom[0x149] == 0 ? 0 : 32;  // ponytail: one 8 KiB bank
     map_pages(0xA0, 32, 0, 0);
-    if (ram_enable && pages) map_pages(0xA0, pages, SRAM_PTR, SRAM_PTR);
+    if (!ram_enable || !ram_size || mbc == MBC_2 || (mbc == MBC_3 && ram_bank > 3)) return;  // MBC3 08-0C: clock
+    uint8_t *p = SRAM_PTR + ((ram_bank * 0x2000) & (ram_size - 1));
+    map_pages(0xA0, ram_size < 0x2000 ? ram_size >> 8 : 32, p, p);
 }
 
-// ---- MBC ------------------------------------------------------------------------------
+// MBC3 clock: counts real time on the GBA (VBlanks of 280896 cycles at 2^24 Hz) while the game
+// runs, and is saved after the cart RAM when that leaves room in SRAM. ponytail: the time the
+// console is off is lost; a GBA cart RTC could supply it.
+static struct { uint32_t secs, frame; uint8_t halt, carry; } rtc;  // secs as of GBA VBlank `frame`
+static uint8_t rtc_latched[5];            // S, M, H, DL, DH
+
+static uint32_t rtc_now(void)
+{
+    return rtc.secs + (rtc.halt ? 0 : (uint32_t)((uint64_t)(gb_frames - rtc.frame) * 280896 >> 24));
+}
+
+static void rtc_set(uint32_t secs)
+{
+    if (secs >= 512 * 86400) rtc.carry = 1, secs %= 512 * 86400;  // the day counter overflows
+    rtc.secs = secs;
+    rtc.frame = gb_frames;
+    if (ram_size + 9 <= 0x8000) {
+        uint8_t b[9] = {'R', 'T', 'C', '1', secs, secs >> 8, secs >> 16, secs >> 24, rtc.halt | rtc.carry << 1};
+        for (int i = 0; i < 9; i++) SRAM8[ram_size + i] = b[i];
+    }
+}
+
+static void rtc_latch(void)
+{
+    rtc_set(rtc_now());
+    uint32_t s = rtc.secs, d = s / 86400;
+    uint8_t t[5] = {s % 60, s / 60 % 60, s / 3600 % 24, d, (d >> 8) | rtc.halt << 6 | rtc.carry << 7};
+    memcpy(rtc_latched, t, 5);
+}
+
+static void rtc_write(unsigned i, uint8_t v)
+{
+    uint32_t s = rtc_now(), d = s / 86400, t[5] = {s % 60, s / 60 % 60, s / 3600 % 24, d & 0xFF, d >> 8};
+    t[i] = i < 4 ? v : v & 1;
+    if (i == 4) rtc.halt = v >> 6 & 1, rtc.carry = v >> 7;
+    rtc_latched[i] = v;
+    rtc_set((t[4] << 8 | t[3]) * 86400 + t[2] * 3600 + t[1] * 60 + t[0]);
+}
+
+static void cart_init(void)
+{
+    uint8_t type = gb_rom[0x147];
+    static const uint32_t sizes[6] = {0, 0x800, 0x2000, 0x8000, 0x20000, 0x10000};
+    mbc = type >= 0x19 && type <= 0x1E ? MBC_5 : type >= 0x0F && type <= 0x13 ? MBC_3
+        : type == 0x05 || type == 0x06 ? MBC_2 : type >= 0x01 && type <= 0x03 ? MBC_1 : MBC_NONE;
+    ram_size = mbc == MBC_2 ? 0x200 : gb_rom[0x149] < 6 ? sizes[gb_rom[0x149]] : 0;
+    if (mbc == MBC_3 && ram_size + 9 <= 0x8000 && SRAM8[ram_size] == 'R' && SRAM8[ram_size + 1] == 'T'
+        && SRAM8[ram_size + 2] == 'C' && SRAM8[ram_size + 3] == '1') {
+        rtc.secs = SRAM8[ram_size + 4] | SRAM8[ram_size + 5] << 8 | SRAM8[ram_size + 6] << 16 | SRAM8[ram_size + 7] << 24;
+        rtc.halt = SRAM8[ram_size + 8] & 1;
+        rtc.carry = SRAM8[ram_size + 8] >> 1 & 1;
+    }
+}
+
+static uint8_t cart_read(uint16_t a)      // A000-BFFF pages that are not mapped directly
+{
+    if (!ram_enable) return 0xFF;
+    if (mbc == MBC_2) return 0xF0 | SRAM8[a & 0x1FF];  // 512 nibbles, mirrored
+    if (mbc == MBC_3 && ram_bank >= 8 && ram_bank <= 0x0C) return rtc_latched[ram_bank - 8];
+    return 0xFF;
+}
+
+static void cart_write(uint16_t a, uint8_t v)
+{
+    if (!ram_enable) return;
+    if (mbc == MBC_2) SRAM8[a & 0x1FF] = v & 0x0F;
+    else if (mbc == MBC_3 && ram_bank >= 8 && ram_bank <= 0x0C) rtc_write(ram_bank - 8, v);
+}
 
 static void set_rom_bank(unsigned bank)
 {
@@ -441,22 +634,41 @@ static void set_rom_bank(unsigned bank)
 
 static void mbc_write(uint16_t a, uint8_t v)
 {
-    uint8_t type = gb_rom[0x147];
-    if (type == 0x00 || type == 0x08 || type == 0x09) return;  // ROM only
-    if (type >= 0x19 && type <= 0x1E) {                         // MBC5
-        if (a < 0x2000) { ram_enable = (v & 0x0F) == 0x0A; map_cart_ram(); }
+    switch (mbc) {
+    case MBC_1:
+        if (a < 0x2000) ram_enable = (v & 0x0F) == 0x0A;
+        else if (a < 0x4000) mbc_lo = v & 0x1F;
+        else if (a < 0x6000) mbc_hi = v & 3;
+        else mbc_mode = v & 1;
+        // ponytail: mode 1 also shows bank 20/40/60 at 0000-3FFF; unmapped (only >= 1 MiB carts use it)
+        set_rom_bank(mbc_hi << 5 | (mbc_lo ? mbc_lo : 1));  // set_rom_bank drops bits past the ROM size
+        ram_bank = mbc_mode ? mbc_hi : 0;
+        break;
+    case MBC_2:
+        if (a >= 0x4000) return;
+        if (a & 0x100) set_rom_bank(v & 0x0F ? v & 0x0F : 1);
+        else ram_enable = (v & 0x0F) == 0x0A;
+        break;
+    case MBC_3:
+        if (a < 0x2000) ram_enable = (v & 0x0F) == 0x0A;
+        else if (a < 0x4000) set_rom_bank(v & 0x7F ? v & 0x7F : 1);
+        else if (a < 0x6000) ram_bank = v;  // 0-3 RAM, 08-0C clock registers
+        else { if (rtc_latch_arm == 0 && v == 1) rtc_latch(); rtc_latch_arm = v; }
+        break;
+    case MBC_5:
+        if (a < 0x2000) ram_enable = (v & 0x0F) == 0x0A;
         else if (a < 0x3000) set_rom_bank((gb.rom_bank & 0x100) | v);
         else if (a < 0x4000) set_rom_bank((gb.rom_bank & 0xFF) | (v & 1) << 8);
-        // ponytail: 0x4000-0x5FFF RAM bank ignored — single 8 KiB bank (DQ1&2); add banking for 32 KiB carts
-        return;
+        else if (a < 0x6000) ram_bank = v & 0x0F;  // rumble carts: bit 3 drives the motor (ignored)
+        break;
+    default: return;                      // ROM only
     }
-    // ponytail: MBC1/2/3 not yet — trap instead of silently mis-banking
-    gb_trap(0, a, TRAP_NO_ENTRY);
+    if (a < 0x2000 || a >= 0x4000) map_cart_ram();  // not on ROM bank writes: far calls switch banks constantly
 }
 
 // ---- IO -------------------------------------------------------------------------------
 
-// ---- APU status (no audio output) -------------------------------------------------------
+// ---- APU status ------------------------------------------------------------------------
 // Sound drivers read registers back and poll NR52's channel bits, and their cycle cost follows
 // what they see. Model the read masks and when a channel is on: trigger with its DAC on, until
 // the DAC goes off or an enabled length counter runs out. Length clocks every 16384 cycles on
@@ -507,6 +719,48 @@ static void apu_write(uint8_t r, uint8_t v)
             ch_len_on &= ~bit;
         }
     }
+}
+
+// ---- APU output ------------------------------------------------------------------------
+// The GBA keeps the GB's four sound channels with the same register bits, clocks and formulas, so
+// each GB register write becomes a byte write to its GBA twin. Wave RAM: the CPU reaches only the
+// bank channel 3 is not playing, so a changed pattern goes there and the banks swap when the
+// channel is triggered or its DAC turned on (games rewrite the pattern with the channel stopped).
+static const uint8_t apu_gba[0x17] = {     // GBA I/O offset of NR10..NR52, 0 = no twin
+    0x60, 0x62, 0x63, 0x64, 0x65, 0, 0x68, 0x69, 0x6C, 0x6D, 0x70, 0x72,
+    0x73, 0x74, 0x75, 0, 0x78, 0x79, 0x7C, 0x7D, 0x80, 0x81, 0x84};
+static uint8_t wave_bank, wave_dirty = 1;
+
+static void apu_out(uint8_t r, uint8_t v)
+{
+    if ((uint8_t)(r - 0x30) < 0x10) { wave_dirty = 1; return; }
+    if (r == 0x26) {                      // power off clears the GBA channels, bank select included
+        if (!(v & 0x80)) wave_bank = 0, wave_dirty = 1;
+        REG_SNDSTAT = v & 0x80;
+        return;
+    }
+    if (r > 0x26 || !apu_gba[r - 0x10] || !(io[0x26] & 0x80)) return;  // powered off: the GB ignores these too
+    if ((r == 0x1A || r == 0x1E) && (v & 0x80) && wave_dirty) {
+        for (int i = 0; i < 4; i++)
+            ((vu32 *)(REG_BASE + 0x90))[i] = io[0x30 + 4 * i] | io[0x31 + 4 * i] << 8 | io[0x32 + 4 * i] << 16 | io[0x33 + 4 * i] << 24;
+        wave_bank ^= 1;
+        wave_dirty = 0;
+        *(vu8 *)(REG_BASE + 0x70) = (io[0x1A] & 0x80) | wave_bank << 6;
+    }
+    if (r == 0x1A) v = (v & 0x80) | wave_bank << 6;  // bit 6 selects the playing bank
+    if (r == 0x1C) v &= 0x60;             // bit 7 would force 75% volume
+    *(vu8 *)(REG_BASE + apu_gba[r - 0x10]) = v;
+}
+
+static void apu_init(void)                // as Mesen's boot ROM leaves it: NR50 77, NR51 F3, NR52 F1
+{
+    io[0x11] = 0x80; io[0x12] = 0xF3;
+    io[0x24] = 0x77; io[0x25] = 0xF3; io[0x26] = 0x80;
+    ch_on = 1;                            // the boot sound's channel 1, still on at its fade-out
+    if (cgb_mode) for (int i = 1; i < 16; i += 2) io[0x30 + i] = 0xFF;  // CGB boot pattern 00 FF
+    REG_SNDSTAT = SSTAT_ENABLE;
+    REG_SNDDSCNT = SDS_DMG100;
+    REG_SNDDMGCNT = 0xF377;
 }
 
 HOT uint8_t gb_read_io(uint8_t r)
@@ -562,6 +816,7 @@ HOT void gb_write_io(uint8_t r, uint8_t v)
     uint8_t old = io[r];
     io[r] = v;
     if ((uint8_t)(r - 0x10) < 0x17) apu_write(r, v);
+    if ((uint8_t)(r - 0x10) < 0x30) apu_out(r, v);
     switch (r) {
     case 0x04: div_base = gb.cyc; break;
     case 0x05: io[0x05] = v; timer_restart(); schedule(); break;
@@ -578,12 +833,15 @@ HOT void gb_write_io(uint8_t r, uint8_t v)
             if ((io[0x41] & 0x40) && io[0x45] == 0) raise_irq(1, gb.cyc);  // LY=0 matches LYC=0 at once
         }
         if ((old & 0x80) && !(v & 0x80)) { ppu_acc += gb.cyc - ppu_on_at; pace_at = gb.cyc + FRAME; }
-        ppu_lcdc(old);
+        if ((old ^ v) & 0x06) ppu_all_obj();  // OBJ size or enable
+        raster_write();
         schedule();
         break;
-    case 0x41: case 0x45: schedule(); break;
-    case 0x42: case 0x43: ppu_scroll(); break;
-    case 0x4A: case 0x4B: ppu_scroll(); ppu_dispcnt(); break;
+    case 0x45:                            // a new LYC still to come this frame fires this frame
+        if (LCDC & 0x80) lyc_done = lcd_pos() >= lyc_event(v);
+        schedule(); break;
+    case 0x41: schedule(); break;
+    case 0x42: case 0x43: case 0x4A: case 0x4B: raster_write(); break;
     case 0x46: oam_dma(v); break;
     case 0x47: case 0x48: case 0x49: if (!cgb_mode) ppu_palettes(); break;
     case 0x55: if (cgb_mode) vram_dma(v); break;
@@ -605,7 +863,7 @@ HOT uint8_t gb_read_slow(uint16_t a)
 {
     if (a >= 0xFF80) return gb_hram[a - 0xFF80];  // includes IE at FFFF
     if (a < 0xA000) return vram[(cgb_mode && (io[0x4F] & 1)) * 0x2000 + a - 0x8000];
-    if (a < 0xC000) return ram_enable ? ((volatile uint8_t *)MEM_SRAM)[a - 0xA000] : 0xFF;
+    if (a < 0xC000) return cart_read(a);
     if (a < 0xFE00) return rd8(a - 0x2000);  // echo RAM
     if (a < 0xFEA0) return oam[a - 0xFE00];
     if (a < 0xFF00) return 0xFF;
@@ -627,7 +885,7 @@ HOT void gb_write_slow(uint16_t a, uint8_t v)
         else ppu_map_write(off - 0x1800);  // tile index (bank 0) or CGB attributes (bank 1)
         return;
     }
-    if (a < 0xC000) { if (ram_enable) ((volatile uint8_t *)MEM_SRAM)[a - 0xA000] = v; return; }
+    if (a < 0xC000) { cart_write(a, v); return; }
     if (a < 0xFE00) { wr8(a - 0x2000, v); return; }
     if (a < 0xFEA0) { oam[a - 0xFE00] = v; ppu_obj((a - 0xFE00) >> 2); return; }
     if (a < 0xFF00) return;
@@ -752,25 +1010,44 @@ static GbFn hram_stub(uint16_t addr)
 
 static struct { uint32_t key; GbFn fn; } lookup_cache[512] IWRAM_DATA;  // direct-mapped
 
-HOT GbFn gb_lookup(uint16_t addr)
+static GbFn find_entry(uint32_t key)
 {
-    uint32_t bank = addr < 0x4000 ? 0 : gb.rom_bank, key = bank << 16 | addr;
-    unsigned slot = (key ^ key >> 9) & 511;
-    if (lookup_cache[slot].key == key && lookup_cache[slot].fn) return lookup_cache[slot].fn;
-    if (addr >= 0x8000) {
-        GbFn stub = addr >= 0xFF80 ? hram_stub(addr) : 0;
-        if (!stub) gb_trap(0xFFFF, addr, TRAP_NO_ENTRY);  // RAM code without a native hook
-        return stub;
-    }
     uint32_t lo = 0, hi = gb_entry_count;
     while (lo < hi) {
         uint32_t mid = (lo + hi) / 2;
         if (gb_entries[mid].key < key) lo = mid + 1; else hi = mid;
     }
-    if (lo == gb_entry_count || gb_entries[lo].key != key) gb_trap(bank, addr, TRAP_NO_ENTRY);
+    return lo < gb_entry_count && gb_entries[lo].key == key ? gb_entries[lo].fn : 0;
+}
+
+static GbFn ram_code(uint16_t addr)       // compiled copy of ROM code, while RAM still holds that copy
+{
+    for (unsigned i = 0; i < gb_overlay_count; i++) {
+        const GbOverlay *o = &gb_overlays[i];
+        if ((uint16_t)(addr - o->ram) >= o->size) continue;
+        unsigned j = 0;
+        while (j < o->size && rd8(o->ram + j) == gb_rom[o->rom + j]) j++;
+        if (j == o->size) return find_entry(addr);
+    }
+    return 0;
+}
+
+HOT GbFn gb_lookup(uint16_t addr)
+{
+    uint32_t bank = addr < 0x4000 ? 0 : gb.rom_bank, key = bank << 16 | addr;
+    unsigned slot = (key ^ key >> 9) & 511;
+    if (lookup_cache[slot].key == key && lookup_cache[slot].fn) return lookup_cache[slot].fn;
+    if (addr >= 0x8000) {                 // RAM: not cached, the game may copy other code there
+        GbFn fn = addr >= 0xFF80 ? hram_stub(addr) : 0;
+        if (!fn) fn = ram_code(addr);
+        if (!fn) gb_trap(0xFFFF, addr, TRAP_NO_ENTRY);
+        return fn;
+    }
+    GbFn fn = find_entry(key);
+    if (!fn) gb_trap(bank, addr, TRAP_NO_ENTRY);
     lookup_cache[slot].key = key;
-    lookup_cache[slot].fn = gb_entries[lo].fn;
-    return gb_entries[lo].fn;
+    lookup_cache[slot].fn = fn;
+    return fn;
 }
 
 void gb_trap(uint16_t bank, uint16_t addr, uint8_t reason)
@@ -781,13 +1058,21 @@ void gb_trap(uint16_t bank, uint16_t addr, uint8_t reason)
     gb_trap_info.reason = reason;
     gb_trap_info.hit = 1;
     REG_IME = 0;
+    REG_SNDSTAT = 0;                      // no note left droning under the trap screen
+    raster_stop();                        // raster DMA would rewrite the display registers
     REG_DISPCNT = DCNT_MODE0 | DCNT_BG0;
     REG_BG0HOFS = REG_BG0VOFS = 0;
     pal_bg_mem[0] = CLR_BLACK;            // the game's palettes may hide TTE's ink colour
     for (int i = 1; i < 256; i++) pal_bg_mem[i] = CLR_WHITE;
     tte_init_se_default(0, BG_CBB(2) | BG_SBB(31));
-    tte_init_con();                       // tte_printf goes through stdio: without this it prints nothing
-    tte_printf("#{P:8,8}gbforge trap\n#{X:8}%s\n#{X:8}at %02X:%04X", names[reason < 6 ? reason : 0], bank, addr);
+    // tte_write, not tte_printf: stdio would put newlib's 4 KiB handle table in IWRAM, under the stack
+    char at[] = "at BB:AAAA";
+    for (int i = 0; i < 2; i++) at[3 + i] = "0123456789ABCDEF"[bank >> (4 - 4 * i) & 15];
+    for (int i = 0; i < 4; i++) at[6 + i] = "0123456789ABCDEF"[addr >> (12 - 4 * i) & 15];
+    tte_write("#{P:8,8}gbforge trap\n#{X:8}");
+    tte_write(names[reason < 6 ? reason : 0]);
+    tte_write("\n#{X:8}");
+    tte_write(at);
     for (;;) Halt();
 }
 
@@ -801,7 +1086,7 @@ struct GbInject {
     uint32_t armed;                       // 0
     uint16_t pc, sp;                      // 4
     uint8_t a, f, b, c, d, e, h, l;       // 8
-    uint8_t ime, ie, ram_enable, pad;     // 16
+    uint8_t ime, ie, ram_enable, ram_bank;  // 16
     uint16_t rom_bank, line, dot, div;    // 20: PPU position of the capture, 16-bit DIV counter
     uint8_t io[0x80];                     // 28: FF00-FF7F
     uint8_t hram[0x80];                   // 156: FF80-FFFE
@@ -831,22 +1116,24 @@ static void inject_apply(void)
     }
     memcpy(io, s->io, 0x80);
     ram_enable = s->ram_enable;
+    ram_bank = s->ram_bank;
+    mbc_lo = s->rom_bank & 0x1F;          // MBC1 rebuilds the bank from these on the next write
+    mbc_hi = s->rom_bank >> 5 & 3;
     set_rom_bank(s->rom_bank);
     map_cart_ram();
     gb_write_io(0x70, io[0x70]);          // SVBK mapping
     map_vram();
     for (unsigned t = 0; t < 0x1800; t += 2) ppu_tile_row(0, t), ppu_tile_row(1, t);
     for (unsigned off = 0; off < 0x800; off++) ppu_map_write(off);
-    ppu_lcdc(LCDC);
     ppu_all_obj();
     ppu_palettes();
-    ppu_scroll();
     // GB time continues from the capture's frame position; it is also where frames now tick
     uint32_t f = s->line * LINE + s->dot;
     frame_start = gb.cyc - f;
     vblank_line_done = f >= 144 * LINE + LINE_IRQ_AT;
     lyc_done = f >= lyc_event(io[0x45]);
     hblank_line = s->line >= 144 ? 144 : s->line + (s->dot >= HBLANK_AT);
+    raster_reset();
     ppu_acc = 0;                          // the original steps whole frames from the capture
     ppu_on_at = gb.cyc;
     gb_pace_next = FRAME;
@@ -880,9 +1167,24 @@ static void prof_isr(void)
 }
 #endif
 
+static void oam_flush(void)               // GBA puts lower OAM indices on top; the DMG lets lower X win
+{
+    uint8_t ord[40];
+    for (unsigned i = 0; i < 40; i++) {   // CGB: OAM order; DMG: stable insertion sort by GB X
+        unsigned j = i;
+        while (!cgb_mode && j && oam[ord[j - 1] * 4 + 1] > oam[i * 4 + 1]) ord[j] = ord[j - 1], j--;
+        ord[j] = i;
+    }
+    for (unsigned k = 0; k < 40; k++) {
+        oam_mem[k] = obj_shadow[ord[k]];
+        if (obj_dropped >> ord[k] & 1) oam_mem[k].attr0 = ATTR0_HIDE;
+    }
+}
+
 static void vblank_isr(void)
 {
-    oam_copy(oam_mem, obj_shadow, 40);
+    oam_flush();
+    raster_vblank();
     gb_frames++;                          // real time; GB interrupts come from GB time (run_events)
 }
 
@@ -890,6 +1192,7 @@ int main(void)
 {
     REG_WAITCNT = 0x4317;                 // 3/1 ROM waitstates + prefetch
     cgb_mode = gb_rom[0x143] & 0x80;
+    cart_init();
     set_rom_bank(1);
     gb_wramx = (uint8_t *)((uintptr_t)gb_wram + 0x1000 - 0xD000);
     map_pages(0xC0, 16, gb_wram, gb_wram);
@@ -912,9 +1215,11 @@ int main(void)
     gb.sp = 0xFFFE;
     gb.frame_sp = 0xFFFF;                 // top level: no C call frame to protect
     io[0x00] = 0x30;
+    apu_init();
     io[0x40] = 0x91;
     io[0x47] = 0xFC;
     ppu_init();
+    raster_reset();
     pace_at = FRAME;
     gb_pace_next = (144 * LINE + LINE_IRQ_AT + FRAME - (0u - frame_start) % FRAME) % FRAME;  // first VBlank
     schedule();

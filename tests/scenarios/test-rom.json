@@ -1,0 +1,7 @@
+{
+  "description": "Generic test ROM run: let it finish, then compare the result screen with the original.",
+  "steps": [
+    {"step": 600},
+    {"shot": "result"}
+  ]
+}

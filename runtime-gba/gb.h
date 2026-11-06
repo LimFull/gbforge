@@ -40,6 +40,11 @@ extern uint8_t *gb_wpage[256];        // per page: direct write pointer, 0 = slo
 // generated
 extern const GbEntry gb_entries[];
 extern const uint32_t gb_entry_count;
+// Code the game copies from ROM into RAM, compiled at its RAM address (key bank 0). Entered only
+// while RAM still holds those ROM bytes. Written by gb2gba port (gen/overlays.c).
+typedef struct { uint16_t ram; uint32_t rom; uint16_t size; } GbOverlay;
+extern const GbOverlay gb_overlays[];
+extern const unsigned gb_overlay_count;
 extern const GbFn gb_vectors[5];  // 0x40 VBlank, 0x48 STAT, 0x50 Timer, 0x58 Serial, 0x60 Joypad
 void gb_entry(void);
 

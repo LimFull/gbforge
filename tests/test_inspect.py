@@ -57,15 +57,15 @@ class InspectTest(unittest.TestCase):
 
     def test_unsupported_cartridge_exit_code_4(self):
         rom = bytearray(read(TINY))
-        rom[0x147] = 0x13                                  # MBC3+RAM+BATTERY
-        rom[0x14D] = (rom[0x14D] - 0x13) & 0xFF            # header checksum: (x - b - 1) per byte
-        tmp = os.path.join(ROOT, "build", "mbc3.gb")
+        rom[0x147] = 0x22                                  # MBC7+SENSOR+RUMBLE+RAM+BATTERY
+        rom[0x14D] = (rom[0x14D] - 0x22) & 0xFF            # header checksum: (x - b - 1) per byte
+        tmp = os.path.join(ROOT, "build", "mbc7.gb")
         with open(tmp, "wb") as f:
             f.write(rom)
-        r = subprocess.run([sys.executable, CLI, "port", tmp, "--output", os.path.join(ROOT, "build", "mbc3.gba")],
+        r = subprocess.run([sys.executable, CLI, "port", tmp, "--output", os.path.join(ROOT, "build", "mbc7.gba")],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 4)
-        self.assertIn("MBC3+RAM+BATTERY cartridge", r.stderr)
+        self.assertIn("MBC7+SENSOR+RUMBLE+RAM+BATTERY cartridge", r.stderr)
 
 
 if __name__ == "__main__":

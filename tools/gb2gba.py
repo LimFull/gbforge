@@ -165,10 +165,10 @@ def core(args):
 def runtime_gaps(header):
     """Cartridge features the GBA runtime does not implement yet (README: Compatibility)."""
     cart = header["cartridge_type"]
-    if cart["mapper"] not in ("ROM", "MBC5"):
-        return [f"{cart['name']} cartridge: the runtime has ROM-only and MBC5 so far"]
-    if header["ram_size"] > 8 << 10:
-        return [f"{header['ram_size'] >> 10} KiB cart RAM: the runtime maps one 8 KiB bank so far"]
+    if cart["mapper"] not in ("ROM", "MBC1", "MBC2", "MBC3", "MBC5"):
+        return [f"{cart['name']} cartridge: the runtime has ROM-only and MBC1/2/3/5"]
+    if header["ram_size"] > 32 << 10:
+        return [f"{header['ram_size'] >> 10} KiB cart RAM: GBA SRAM holds 32 KiB"]
     return []
 
 
@@ -193,6 +193,46 @@ def far_call_entries(rom):
     return sorted(found)
 
 
+# SM83 instruction lengths: 3 for 16-bit operands, 2 for 8-bit operands and CB/STOP, else 1.
+OP3 = {0x01, 0x11, 0x21, 0x31, 0x08, 0xC2, 0xC3, 0xC4, 0xCA, 0xCC, 0xCD, 0xD2, 0xD4, 0xDA, 0xDC, 0xEA, 0xFA}
+OP2 = {0x06, 0x0E, 0x16, 0x1E, 0x26, 0x2E, 0x36, 0x3E, 0xC6, 0xCE, 0xD6, 0xDE, 0xE6, 0xEE, 0xF6, 0xFE,
+       0x18, 0x20, 0x28, 0x30, 0x38, 0xE0, 0xF0, 0xE8, 0xF8, 0xCB, 0x10}
+
+
+def ram_overlays(rom, ram_log):
+    """Code the original executed from RAM (OUT.cdl.ram, see scripts/mesen_cdl.lua), traced back to
+    the ROM bytes it was copied from: [(ram_addr, rom_offset, size)], RAM addresses not found, and
+    the executed instructions inside found code (entry points: the analyzer does not follow calls
+    into RAM). Executed instructions are joined into runs; each run's bytes are looked up in the ROM.
+    ponytail: one copy per RAM address (the first seen); code patched after copying is not found."""
+    seen = {}
+    with open(ram_log) as f:
+        for line in f.read().split():
+            if len(line) == 4:
+                pc = int(line, 16)
+            else:
+                seen.setdefault(pc, bytes.fromhex(line))
+    runs, found, missing, entries = [], [], [], []
+    for pc in sorted(seen):
+        size = 3 if seen[pc][0] in OP3 else 2 if seen[pc][0] in OP2 else 1
+        if runs and pc <= runs[-1][1]:
+            runs[-1][1] = max(runs[-1][1], pc + size)
+        else:
+            runs.append([pc, pc + size])
+    for start, end in runs:
+        code = bytearray(end - start)
+        for pc in range(start, end):
+            if pc in seen:
+                code[pc - start:pc - start + 4] = seen[pc][:end - pc]
+        at = rom.find(bytes(code))
+        if at < 0:
+            missing.append(start)
+            continue
+        found.append((start, at, end - start))
+        entries += [pc for pc in seen if start <= pc < end]
+    return found, missing, sorted(entries)
+
+
 def analysis_args(args, rom):
     out = ["--no-scan"] if args.no_scan else []
     for e in (args.entry or []) + far_call_entries(rom):
@@ -201,6 +241,13 @@ def analysis_args(args, rom):
         out += ["--trace", args.trace]
     if args.cdl:
         out += ["--cdl", args.cdl]
+        if os.path.exists(args.cdl + ".ram"):
+            found, _, entries = ram_overlays(rom, args.cdl + ".ram")
+            for ram, at, size in found:
+                bank, off = at // 0x4000, at % 0x4000 + (0x4000 if at >= 0x4000 else 0)
+                out += ["--overlay", f"{ram:04X}:{bank:02X}:{off:04X}:{size:X}"]
+            for pc in entries:
+                out += ["--entry", f"00:{pc:04X}"]
     return out
 
 
@@ -256,6 +303,7 @@ def write_map(sym_path, map_path, header):
                      "pace_next": f"0x{syms['gb_pace_next']:08X}"},  # when the GB frame count ticks
             "inject": f"0x{syms['gb_inject']:08X}",         # struct GbInject (runtime-gba/gb.c)
             "keys": f"0x{syms['gb_keys']:08X}",             # u16 KEYINPUT override, 0xFFFF = none
+            "script": f"0x{syms['gb_script']:08X}",         # {u32 GB frame, u32 keys}[32]: gb_keys by frame
             "colour": f"0x{syms['gb_colour']:08X}",         # u16[0x8000] CGB rgb555 -> GBA palette value
             **({"profile": {"pcs": f"0x{syms['gb_prof_pcs']:08X}", "count": f"0x{syms['gb_prof_count']:08X}", "size": 4096}}
                if "gb_prof_pcs" in syms else {}),
@@ -291,7 +339,17 @@ def cmd_port(args):
     if gaps:
         print("unsupported: " + "; ".join(gaps), file=sys.stderr)
         return finish(4, errors=gaps)
+    if report["rom_header"]["cartridge_type"]["timer"] and report["rom_header"]["ram_size"] >= 32 << 10:
+        report.setdefault("warnings", []).append("MBC3 clock is not saved: 32 KiB cart RAM fills GBA SRAM")
     report["far_call_entries"] = len(far_call_entries(rom))
+    found, missing, _ = ram_overlays(rom, args.cdl + ".ram") if args.cdl and os.path.exists(args.cdl + ".ram") else ([], [], [])
+    report["ram_code"] = {"compiled": [f"{r:04X} <- {a:06X} ({n} bytes)" for r, a, n in found],
+                          "not_in_rom": [f"{r:04X}" for r in missing]}
+    os.makedirs(gen, exist_ok=True)
+    with open(os.path.join(gen, "overlays.c"), "w") as f:  # runtime-gba: RAM code compiled from ROM
+        f.write('#include "gb.h"\nconst GbOverlay gb_overlays[] = {\n'
+                + "".join(f"    {{0x{r:04X}, 0x{a:06X}, {n}}},\n" for r, a, n in found)
+                + f"    {{0, 0, 0}}}};\nconst unsigned gb_overlay_count = {len(found)};\n")
     if core(["codegen", args.rom, gen, *analysis_args(args, rom)]) != 0:
         return finish(3, errors=["codegen failed (see stderr)"])
     with open(os.path.join(gen, "codegen.json")) as f:

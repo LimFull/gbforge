@@ -2,9 +2,11 @@
 //
 //   gbforge-core analyze ROM OUT.json [--entry BB:AAAA]... [--trace FILE] [--cdl FILE] [--no-scan]
 //   gbforge-core codegen ROM OUTDIR   [--entry BB:AAAA]... [--trace FILE] [--cdl FILE] [--no-scan]
+//                                     [--overlay RAM:BB:AAAA:SIZE]...  (code copied from ROM to RAM)
 //
-// --cdl: Mesen Code/Data Logger flags for PRG ROM (scripts/mesen_cdl.py). Executed jump targets
-// and sub entries become entry points; bytes only ever read as data become data annotations.
+// --cdl: Mesen Code/Data Logger flags for PRG ROM (scripts/mesen_cdl.py). Executed jump targets,
+// sub entries and the start of each executed run become entry points; bytes only ever read as
+// data become data annotations.
 // This is coverage evidence from a real run, never a resolution of an unresolved indirect edge.
 //
 // Exit codes follow the gb2gba contract: 0 ok, 2 invalid ROM, 3 unresolved paths (codegen, strict).
@@ -61,7 +63,10 @@ static bool load_cdl(const char* path, const ROM& rom, AnalyzerOptions& opts)
     };
     enum { CODE = 1, DATA = 2, JUMP_TARGET = 4, SUB_ENTRY = 8 };
     for (size_t i = 0; i < cdl.size(); i++) {
-        if (cdl[i] & (JUMP_TARGET | SUB_ENTRY)) opts.entry_points.push_back(full(i));
+        // The first executed byte after bytes that never executed starts an instruction: also an
+        // entry, which catches returns past inline data (CALL print / "text" / code continues).
+        if ((cdl[i] & (JUMP_TARGET | SUB_ENTRY)) || ((cdl[i] & CODE) && (i == 0 || !(cdl[i - 1] & CODE))))
+            opts.entry_points.push_back(full(i));
         // ponytail: data-only in this run; a byte executed only in another run would be mis-annotated
         if ((cdl[i] & (CODE | DATA)) == DATA && (i == 0 || (cdl[i - 1] & (CODE | DATA)) != DATA || i % 0x4000 == 0)) {
             size_t j = i;
@@ -160,6 +165,11 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--trace") && i + 1 < argc) opts.trace_file_path = argv[++i];
         else if (!std::strcmp(argv[i], "--no-scan")) opts.aggressive_scan = false;
         else if (!std::strcmp(argv[i], "--cdl") && i + 1 < argc) cdl_path = argv[++i];
+        else if (!std::strcmp(argv[i], "--overlay") && i + 1 < argc) {  // RAM:BB:AAAA:SIZE (hex): RAM code copied from ROM
+            unsigned ram, bank, addr, size;
+            if (std::sscanf(argv[++i], "%x:%x:%x:%x", &ram, &bank, &addr, &size) != 4) { std::fprintf(stderr, "bad --overlay\n"); return 2; }
+            opts.ram_overlays.push_back({uint16_t(ram), AnalysisResult::make_addr(BankId(bank), uint16_t(addr)), uint16_t(size)});
+        }
         else { std::fprintf(stderr, "unknown option: %s\n", argv[i]); return 2; }
     }
 

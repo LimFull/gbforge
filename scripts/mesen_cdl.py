@@ -2,8 +2,10 @@
 """Record Mesen's Code/Data Logger for a GB/GBC ROM played headless with scripted input.
 
 usage: scripts/mesen_cdl.py ROM OUT.cdl --frames N [--inputs "700:start:3;800:a:3"] [--merge OLD.cdl]
-The CDL (1 flag byte per ROM byte) feeds `gb2gba analyze|port --cdl`. Needs MESEN_BIN (local.env);
-Mesen runs from a private copy in build/mesen-cdl so the emucap package stays untouched.
+The CDL (1 flag byte per ROM byte) feeds `gb2gba analyze|port --cdl`; OUT.cdl.ram lists the
+instructions executed from RAM (see mesen_cdl.lua), from which `port` finds code copied out of ROM.
+Needs MESEN_BIN (local.env); Mesen runs from a private copy in build/mesen-cdl so the emucap
+package stays untouched.
 """
 import argparse
 import os
@@ -34,7 +36,7 @@ def main():
     with open(os.path.join(home, "settings.json"), "w") as f:
         f.write(SETTINGS)
     out = os.path.abspath(a.out)
-    env = dict(os.environ, CDL_OUT=out, CDL_FRAMES=str(a.frames), CDL_INPUTS=a.inputs,
+    env = dict(os.environ, CDL_OUT=out, CDL_FRAMES=str(a.frames), CDL_INPUTS=a.inputs, CDL_RAM=out + ".ram.new",
                CDL_CART_IN=os.path.abspath(a.cart_in) if a.cart_in else "",
                CDL_CART_OUT=os.path.abspath(a.cart_out) if a.cart_out else "")
     if a.clear_cart:
@@ -47,12 +49,20 @@ def main():
         cdl = bytearray(f.read())
     if len(cdl) != rom_size:
         raise SystemExit(f"CDL has {len(cdl)} bytes, ROM {rom_size}")
+    with open(out + ".ram.new") as f:          # RAM code executions, merged like the CDL
+        ram = set(f.read().split("\n")) - {""}
+    os.remove(out + ".ram.new")
     if a.merge and os.path.exists(a.merge):
         with open(a.merge, "rb") as f:
             old = f.read()
         cdl = bytearray(x | y for x, y in zip(cdl, old))
         with open(out, "wb") as f:
             f.write(cdl)
+        if os.path.exists(a.merge + ".ram"):
+            with open(a.merge + ".ram") as f:
+                ram |= set(f.read().split("\n")) - {""}
+    with open(out + ".ram", "w") as f:
+        f.write("".join(line + "\n" for line in sorted(ram)))
     print(f"{out}: {sum(1 for b in cdl if b & 1)} code bytes, {sum(1 for b in cdl if b & 0x0C)} entry points")
 
 

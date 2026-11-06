@@ -79,10 +79,15 @@ def capture_state(m):
     io[0x0F] = st["memoryManager.irqRequests"] & 0x1F
     pal = lambda kind: b"".join((st[f"ppu.cgb{kind}Palettes{i}"] & 0xFFFF).to_bytes(2, "little") for i in range(32))
     lcd = st["ppu.lcdEnabled"]
+    ram_bank = st.get("cart.ramBank", 0)
+    rom_bank = st["cart.prgBank"]
+    if "cart.mode" in st:                 # Mesen's MBC1 keeps the 5-bit and 2-bit registers apart
+        rom_bank |= ram_bank << 5
+        ram_bank = ram_bank if st["cart.mode"] else 0
     hdr = struct.pack("<IHH8B4B4H", 0, st["cpu.pc"], st["cpu.sp"],
                       st["cpu.a"], st["cpu.flags"], st["cpu.b"], st["cpu.c"], st["cpu.d"], st["cpu.e"], st["cpu.h"], st["cpu.l"],
-                      int(st["cpu.ime"]), st["memoryManager.irqEnabled"], int(st["cart.ramEnabled"]), 0,
-                      st["cart.prgBank"], st["ppu.scanline"] if lcd else 0, st["ppu.cycle"] if lcd else 0,
+                      int(st["cpu.ime"]), st["memoryManager.irqEnabled"], int(st["cart.ramEnabled"]), ram_bank,
+                      rom_bank, st["ppu.scanline"] if lcd else 0, st["ppu.cycle"] if lcd else 0,
                       st["timer.divider"] & 0xFFFF)
     return (hdr + bytes(io) + rd("gbHighRam", 0, 0x7F) + b"\0" + pal("Bg") + pal("Obj") + rd("gbSpriteRam", 0, 0xA0)
             + region("gbWorkRam", 0x8000) + region("gbVideoRam", 0x4000))
@@ -116,17 +121,24 @@ class GbClock:
         return int.from_bytes(bytes.fromhex(h), "little")
 
     def step(self, n):
-        target, idle = self.now() + n, 0
-        while (left := target - self.now()) > 0:
-            self.m.call("step", {"count": left})
-            idle = idle + left if self.now() == target - left else 0
-            if idle > 600:  # 10 s of GBA frames without a GB frame (LCD-off loads are far shorter): stuck
-                why = ""
-                if self.trap_addr:  # gb_trap_info: u16 bank, u16 addr, u8 reason, u8 hit
-                    t = bytes.fromhex(self.m.call("read_memory", {"memory_type": "gbaMemory", "address": self.trap_addr, "length": 6})["hex"])
-                    if t[5]:
-                        why = f": trap {t[4]} at {int.from_bytes(t[0:2], 'little'):02X}:{int.from_bytes(t[2:4], 'little'):04X}"
-                raise RuntimeError(f"port stopped counting GB frames at {target - left}{why}")
+        """Run until the GB frame counter reads now + n. A write breakpoint on that value stops at the
+        frame tick itself: one emulator run per step, and the port is always paused at the same GB
+        moment however much it lags (stepping GBA frames could stop it mid-frame)."""
+        target = self.now() + n
+        bp = self.m.call("set_breakpoint", {"kind": "write", "memory_type": "gbaMemory", "start": self.addr,
+                                            "end": self.addr, "value": target, "pause_on_hit": True})["id"]
+        try:
+            while (now := self.now()) < target:
+                self.m.call("step", {"count": 600})
+                if self.now() == now:  # 10 s of GBA frames without a GB frame (LCD-off loads are far shorter)
+                    why = ""
+                    if self.trap_addr:  # gb_trap_info: u16 bank, u16 addr, u8 reason, u8 hit
+                        t = bytes.fromhex(self.m.call("read_memory", {"memory_type": "gbaMemory", "address": self.trap_addr, "length": 6})["hex"])
+                        if t[5]:
+                            why = f": trap {t[4]} at {int.from_bytes(t[0:2], 'little'):02X}:{int.from_bytes(t[2:4], 'little'):04X}"
+                    raise RuntimeError(f"port stopped counting GB frames at {now}{why}")
+        finally:
+            self.m.call("clear_breakpoint", {"id": bp})
 
 
 def port_options(rom):
@@ -141,11 +153,12 @@ def port_options(rom):
             "trap_addr": int(mem["trap"], 16) if "trap" in mem else None,
             "pace": {k: int(v, 16) for k, v in mem["pace"].items()} if "pace" in mem else None,
             "inject": int(mem["inject"], 16) if "inject" in mem else None,
-            "keys": int(mem["keys"], 16) if "keys" in mem else None}
+            "keys": int(mem["keys"], 16) if "keys" in mem else None,
+            "script": int(mem["script"], 16) if "script" in mem else None}
 
 
 def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None, extra=None, trap_addr=None,
-        pace=None, inject=None, inject_states=None, keys=None):
+        pace=None, inject=None, inject_states=None, keys=None, script=None):
     """Play the scenario; `extra(do)` (if given) may then execute more steps in the same session.
 
     {"inject": {"at": PC}}: on the original, run to PC (a compiled entry, e.g. the main loop's
@@ -168,19 +181,36 @@ def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None,
         result["system"] = args.get("system")
         result["emulator"] = f"Mesen {host.get('tag')} ({host.get('commit', '')[:10]})"
         clock = GbClock(m, gb_frames_addr, trap_addr) if gb_frames_addr else None
-        if inject is None and args.get("system") in ("gb", "gbc"):
-            # Mesen fills RAM with random values at power-on, so two runs of the same scenario could
-            # differ wherever a game reads memory it never wrote. Zero it, as a port powers on.
-            sizes = {r["memory_type"]: r["size"] for r in st["memory_regions"]}   # DMG WRAM is 8 KiB
-            for kind in ("gbWorkRam", "gbHighRam"):
-                size = sizes[kind]
-                for a in range(0, size, 0x4000):
-                    m.call("write_memory", {"memory_type": kind, "address": a, "hex": "00" * min(0x4000, size - a)})
-            m.call("write_memory", {"memory_type": "gameboyMemory", "address": 0xFF30, "hex": "00" * 16})  # wave RAM
 
         periodic = {"at": None, "every": 0, "since": 0}
+        # Port with an input schedule: steps and taps only advance a plan; the emulator runs it in
+        # one go, keys applied by the port at each frame tick, when something must be observed.
+        plan = {"base": None, "frames": 0, "script": []}
+
+        def flush():
+            if plan["base"] is None:
+                return
+            for f, k in plan["script"]:  # due now: the port is paused past this frame's tick (e.g. after "until")
+                if f == plan["base"]:
+                    m.call("write_memory", {"memory_type": "gbaMemory", "address": keys, "hex": k.to_bytes(2, "little").hex()})
+            entries = plan["script"] + [(0, 0)] * (32 - len(plan["script"]))
+            m.call("write_memory", {"memory_type": "gbaMemory", "address": script,
+                                    "hex": b"".join(f.to_bytes(4, "little") + k.to_bytes(4, "little") for f, k in entries).hex()})
+            target, plan["base"] = plan["base"] + plan["frames"], None
+            clock.step(target - clock.now())
+
+        def planned(frames, presses=()):
+            if plan["base"] is not None and len(plan["script"]) + len(presses) > 32:
+                flush()
+            if plan["base"] is None:
+                plan.update(base=clock.now(), frames=0, script=[])
+            at = plan["base"] + plan["frames"]
+            plan["script"] += [(at + offset, k) for offset, k in presses]
+            plan["frames"] += frames
+            return at
 
         def inject_now(at):
+            flush()
             n = len(result.setdefault("inject", []))
             if inject is None:  # original
                 run_to_pc(m, at, 120)
@@ -200,6 +230,16 @@ def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None,
             if "tap" in s and periodic["every"] and periodic["since"] >= periodic["every"]:
                 inject_now(periodic["at"])
             periodic["since"] += s.get("step", 0) + (s.get("press", 2) + s.get("after", 1) if "tap" in s else 0)
+            if script and clock and ("step" in s or "tap" in s):
+                press, after = s.get("press", 2), s.get("after", 1)
+                if "step" in s:
+                    planned(s["step"])
+                else:
+                    down = sum(1 << GBA_KEYS[b] for b in s["tap"])
+                    at = planned(press + after, [(0, 0x3FF & ~down), (press, 0x3FF)])
+                    result.setdefault("inputs", []).append({"gb_frame": at, "buttons": s["tap"], "press": press})
+                return
+            flush()
             if "step" in s and clock:
                 clock.step(s["step"])
             elif "tap" in s and clock:
@@ -262,10 +302,25 @@ def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None,
             else:
                 raise SystemExit(f"unknown step: {s}")
         try:
+            # Scenarios count frames, never wall time (ports pace on emulated GBA VBlanks), so the
+            # emulator need not run at real speed.
+            d = m.call("debug", {"operation": "describe"})
+            m.call("debug", {"operation": "execution_speed", "arguments": {"mode": "unlimited"},
+                             "known_capability_revision": d.get("capability_revision")})
+            if inject is None and args.get("system") in ("gb", "gbc"):
+                # Mesen fills RAM with random values at power-on, so two runs of the same scenario
+                # could differ wherever a game reads memory it never wrote. Zero it, as a port powers on.
+                sizes = {r["memory_type"]: r["size"] for r in st["memory_regions"]}   # DMG WRAM is 8 KiB
+                for kind in ("gbWorkRam", "gbHighRam"):
+                    for a in range(0, sizes[kind], 0x4000):
+                        m.call("write_memory", {"memory_type": kind, "address": a,
+                                                "hex": "00" * min(0x4000, sizes[kind] - a)})
+                m.call("write_memory", {"memory_type": "gameboyMemory", "address": 0xFF30, "hex": "00" * 16})  # wave RAM
             for s in scenario["steps"]:
                 do(s)
             if extra:
                 extra(do)
+            flush()
             result["final_frame"] = m.call("status", {})["frame"]
         finally:
             m.call("stop", {"launch_id": launch_id})
