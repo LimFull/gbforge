@@ -2,7 +2,7 @@
 
 > A tool that statically analyzes and recompiles the GB CPU code in `.gb` / `.gbc` ROMs into a `.gba` that **runs natively on real GBA hardware**.
 
-⚠️ **Status: Phase 4 (compatibility breadth) in progress.** The engine is generic: nothing in the analyzer, code generator or runtime is keyed to a particular game. Its hardware coverage is checked against these targets (see [Compatibility](#compatibility)):
+⚠️ **Status: Phase 4 (compatibility breadth) in progress.** The engine is generic: nothing in the analyzer, code generator or runtime is keyed to a particular game. Its hardware coverage is checked against these targets (see [Compatibility](#compatibility) and [Tested games](#tested-games)):
 
 - **Homebrew test ROM** (DMG, in this repo): runs as a strict native build and matches the original.
 - **Pokémon Yellow** (MBC5, 32 KiB cart RAM, second commercial game): title → new game → Oak's speech → the player's room → stairs → save, with no game-specific code. Walking, map changes, menus and the 32 KiB save match the original; screens caught mid-text or mid-fade are a frame apart.
@@ -89,6 +89,23 @@ MBC1 and MBC3 are implemented; the Phase 4 gate still needs a commercial game on
 - [ ] A commercial MBC3 game verified against the original (Pokémon Red/Blue; Gold/Silver/Crystal for the clock)
 
 For a new game, check the cartridge type first (`gb2gba inspect`; `port` stops with exit code 4 on an unsupported one) and expect to record a play-through that covers the parts of the game you want to run.
+
+## Tested games
+
+Each one was ported, played with a scenario and compared against the original under emucap (`gb2gba verify`: screens down to colour values, memory reads). ROMs are not in this repository except the redistributable test ROMs; SHA-256 prefixes identify the dumps used.
+
+| Game | Cartridge | SHA-256 | Scenario | Result vs the original |
+|---|---|---|---|---|
+| tiny (own homebrew) | DMG, ROM only | `133d82836e17e149` | `tiny-diff.json` | ✅ All checks match; strict native build |
+| Dragon Quest I&II (Japan) | CGB, MBC5, 8 KiB RAM | `7cae9c90cf50e5b0` | `dq12-p3.json`: title → field → battle → save → continue | ✅ 24/25; the save matches. One mid-fade screen is a frame off |
+| Pokémon Yellow (USA, Europe) | CGB-compatible, MBC5, 32 KiB RAM | `8cbaa499397e4f1a` | `pokeyellow-start.json`: title → new game → names → room → stairs → save | ✅ 29/40; walking, map changes, menus and the 32 KiB save match. 11 screens caught mid-text or mid-fade are a frame off |
+| dmg-acid2 | DMG, ROM only | `464e14b7d42e7fee` | `dmg-acid2.json` | ✅ Matches |
+| cgb-acid2 | CGB, ROM only | `197fb0bcec544f04` | `cgb-acid2.json` | ⚠️ 106 px off, in the eyes (CGB BG-over-sprite priority) |
+| mooneye `emulator-only/mbc1` (13) | MBC1 | mts-20260714 | `test-rom.json` | ⚠️ 10/13; mode 1 bank 0 and multicart wiring not implemented |
+| mooneye `emulator-only/mbc2` (7) | MBC2 | mts-20260714 | `test-rom.json` | ✅ 7/7 |
+| mooneye `emulator-only/mbc5` (8) | MBC5, up to 8 MiB | mts-20260714 | `test-rom.json` | ✅ 8/8 |
+
+DQ and Yellow are research builds (`--allow-unresolved`): unresolved paths trap instead of running an interpreter. No MBC1 or MBC3 commercial game has been tested yet (see the [checklist](#mbc1--mbc3-checklist)). Details: [reports/phase3.md](reports/phase3.md), [reports/phase4.md](reports/phase4.md).
 
 ## Converting a game
 
