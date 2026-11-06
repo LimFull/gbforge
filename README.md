@@ -15,7 +15,7 @@ Details: [reports/phase3.md](reports/phase3.md).
 
 1. **Truly native** — Not a Goomba-style bundle of an emulator plus a ROM. GB code is translated ahead of time to C → ARM/Thumb, and `strict` mode never silently falls back to a GB interpreter. A compatibility runtime that reproduces the *semantics* of GB hardware is still required.
 2. **Correctness → measure performance → expand the screen** — Start with the minimum needed to run a public test ROM on the GBA.
-3. **Separate the generic engine from game-specific mods** — ROM analysis, recompilation, and the GBA runtime are shared code; game-specific addresses, camera, UI, and art live in plugins.
+3. **Generic only** — No game-specific code or data: ROM analysis, recompilation and the GBA runtime work the same for every game. Game-specific work (wider screens, new art, translations) belongs in separate projects built on gbforge's output.
 
 ## Why a simple conversion doesn't work
 
@@ -39,10 +39,8 @@ The GBA's GB compatibility mode is a separate hardware mode. This project produc
    ├─ IR / Metadata ──── functions/edges keyed by (rom_bank, gb_pc), unresolved marked
    │
    ├─ Native Codegen (IR → C → devkitARM)
-   ├─ Asset / Map Analyzer (tiles, palettes, text, maps)                  [planned]
    │
    ├─ GBA Runtime ────── GB CPU semantics / MBC / Timer / IRQ / PPU / APU / Input / Save
-   ├─ Game Plugin ────── applied only to ROMs with a matching SHA-256      [planned]
    │
    └─ out/game.gba ───── verify against the original (emucap) → mGBA → hardware (EZ-Flash, etc.)
 ```
@@ -137,17 +135,7 @@ How a port works: `gbforge-core` links gb-recompiled's analyzer and turns each a
 - **Checkpoints**: `{"inject": {"at": PC, "every": N}}`. On the original, the run stops at PC and saves the whole GB state. PC must be a compiled entry outside interrupt handlers, such as the main loop's idle wait. On the port, the next GB frame tick loads that state into `gb_inject` and restarts native code at PC. With `every`, this repeats before the first input after every N frames. Port timing is close to the original but not cycle-exact, and games that run an RNG in their idle loop (DQ1&2 does) drift apart within hundreds of frames, so checkpoints restart the comparison from identical state.
 - **Screens**: Mesen applies different LCD colour models to GBC and GBA output. For CGB games, `verify` inverts both models and requires every port pixel to be the original pixel's colour value through the port's colour table, so palette-only differences fail. Pixels averaged by Mesen's frame blending (mid-fade) cannot be inverted and count as differences. DMG games are compared up to a one-to-one colour mapping. `shot_tolerance` in a scenario allows a few pixels for blink phases.
 
-## CLI and exit codes
-
-Planned options, not implemented yet: `--plugin`, `--renderer enhanced`, `--viewport` and `--graphics`, shown here for a game plugin.
-
-```bash
-gb2gba port roms/dragon-warrior-i-ii.gbc \
-  --target gba --native-policy strict \
-  --plugin dragon-warrior-i-ii \
-  --renderer enhanced --viewport 240x160 \
-  --graphics custom --output out/dq12-enhanced.gba
-```
+## Exit codes
 
 | Exit code | Meaning |
 |---:|---|
@@ -157,7 +145,6 @@ gb2gba port roms/dragon-warrior-i-ii.gbc \
 | `4` | GB hardware feature not supported by the runtime (checked for the cartridge type; other features trap at run time) |
 | `5` | Code size / ROM / RAM budget exceeded |
 | `6` | External tool error (devkitARM, emucap, etc.) |
-| `7` | Plugin ROM fingerprint mismatch (planned) |
 | `8` | State/screen mismatch against the original during verification |
 
 `--native-policy strict` includes no interpreter. `hybrid` is a separate research build and does not count toward native results.
@@ -169,31 +156,18 @@ gb2gba port roms/dragon-warrior-i-ii.gbc \
 | **0** | Environment check — devkitARM, mGBA, `hello.gba`, `gb-recompiled` spike | `hello.gba` displays and takes input in mGBA |
 | **1** | ROM Inspect + analysis — header/SHA-256/banks, CFG/IR, `inspect`/`analyze` JSON | Identical JSON on repeated runs, clear exit codes |
 | **2** | Minimal strict native — registers/flags/memory/branches, starting with basic opcodes | Homebrew ROM runs as ARM code; missing paths error out |
-| **3** | GBC/RPG compatibility — CGB, MBC5, PPU/DMA/timer/IRQ, saves | DQ title → field → battle → save (compat) |
-| **3b** | Compatibility breadth — MBC1/2/3 (+ clock), MBC5 RAM banking, audio output, mid-frame register changes, BG/OBJ priority, 10 sprites per line | Public test ROMs (dmg-acid2, cgb-acid2) match the original; a second commercial game on MBC1 or MBC3 runs title → gameplay |
-| **4** | Expanded screen — 240×160 camera, map streaming, BG/DMA optimization | Wider world renders correctly on 3+ field maps |
-| **5** | Graphics upgrade — palette/tile/sprite replacement, UI relayout, 60 Hz | Reproducible build using only self-made art |
+| **3** | GBC compatibility — CGB, MBC5, PPU/DMA/timer/IRQ, saves | A commercial GBC game (DQ1&2) runs title → field → battle → save |
+| **4** | Compatibility breadth — MBC1/2/3 (+ clock), MBC5 RAM banking, audio output, mid-frame register changes, BG/OBJ priority, 10 sprites per line | Public test ROMs (dmg-acid2, cgb-acid2) match the original; a second commercial game on MBC1 or MBC3 runs title → gameplay |
+| **5** | Strict native — resolve dynamic dispatch (jump tables, RST tables, per-line handlers) statically or by annotation, so ports build without `--allow-unresolved`; run on real hardware | The validation games build strict and run on a flash cart |
 
-Priority order: `GBA hello world → ROM inspect → static codegen running on GBA → GB runtime → DQ compat → compatibility breadth → 240×160 expansion → graphics upgrade`
-
-## Game plugins (planned)
-
-Plugins carry what cannot be generic: a game's addresses, camera, UI layout and art. They apply only to a ROM whose SHA-256 matches exactly. The first one planned is for Dragon Quest I&II, to widen its screen.
-
-The original screen is **not scaled up**; more tiles are drawn from the same world space.
-
-- Keep 8×8 tiles: 20×18 → 30×20 tiles (~+67%)
-- World-coordinate camera → GBA BG scroll registers
-- Off-screen tiles are decoded from the original map data and streamed via a ring buffer / VBlank DMA
-- Dialogue, battle, and menus get per-scene viewport profiles; unsupported scenes fall back to compat
-- Graphics upgrades start with tile *color and detail*. Converting to 4bpp alone doesn't improve the art — **new art is required**.
+Priority order: `GBA hello world → ROM inspect → static codegen running on GBA → GB runtime → GBC compatibility → compatibility breadth → strict native`
 
 ## References
 
 | Name | Use |
 |---|---|
 | [GB Recompiled](https://github.com/arcanite24/gb-recompiled) | SM83 analysis and static C generation (MIT; its SDL2 runtime can't be used on the GBA as-is) |
-| [Dragon Warrior I & II Recomp](https://github.com/omegakatana92/Dragon-Warrior-I-II-Recomp) | Recompilation reference for the same game (not a GBA port) |
+| [Dragon Warrior I & II Recomp](https://github.com/omegakatana92/Dragon-Warrior-I-II-Recomp) | Recompilation of DQ1&2, the first commercial validation target (not a GBA port) |
 | [libtonc-template](https://github.com/gbadev-org/libtonc-template) | GBA C project skeleton |
 | [Tonc](https://gbadev.net/tonc/) · [gbadoc](https://gbadev.net/gbadoc/) | GBA hardware documentation |
 | [Pan Docs](https://gbdev.io/pandocs/) | Reference for GB hardware accuracy |
@@ -207,4 +181,3 @@ The original screen is **not scaled up**; more tiles are drawn from the same wor
 - This repository **does not contain ROMs, commercial game assets, or code generated from commercial ROMs.** Scenarios for commercial games hold only inputs, labels and addresses.
 - It is a tool for converting ROMs the user legally owns, locally.
 - Tests use only test ROMs licensed for redistribution: our own homebrew and the MIT-licensed acid2 ROMs (`tests/fixtures/acid2/LICENSE`).
-- Game plugins apply only to ROMs with an exact SHA-256 match and never patch other revisions with unverified addresses.
