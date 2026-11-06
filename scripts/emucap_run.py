@@ -67,8 +67,14 @@ def capture_state(m):
     compiled entry outside interrupt handlers so the port can restart there."""
     st = m.call("get_state", {"groups": ["cpu", "ppu", "cart", "memoryManager", "timer"]})["state"]
 
+    sizes = {r["memory_type"]: r["size"] for r in m.call("status", {})["memory_regions"]}
+
     def rd(kind, addr, n):
         return bytes.fromhex(m.call("read_memory", {"memory_type": kind, "address": addr, "length": n})["hex"])
+
+    def region(kind, n):  # the struct holds CGB sizes; DMG has 8 KiB of WRAM and VRAM
+        have = min(n, sizes[kind])
+        return b"".join(rd(kind, a, min(0x4000, have - a)) for a in range(0, have, 0x4000)).ljust(n, b"\0")
     io = bytearray(rd("gameboyMemory", 0xFF00, 0x80))
     io[0x0F] = st["memoryManager.irqRequests"] & 0x1F
     pal = lambda kind: b"".join((st[f"ppu.cgb{kind}Palettes{i}"] & 0xFFFF).to_bytes(2, "little") for i in range(32))
@@ -79,7 +85,7 @@ def capture_state(m):
                       st["cart.prgBank"], st["ppu.scanline"] if lcd else 0, st["ppu.cycle"] if lcd else 0,
                       st["timer.divider"] & 0xFFFF)
     return (hdr + bytes(io) + rd("gbHighRam", 0, 0x7F) + b"\0" + pal("Bg") + pal("Obj") + rd("gbSpriteRam", 0, 0xA0)
-            + rd("gbWorkRam", 0, 0x4000) + rd("gbWorkRam", 0x4000, 0x4000) + rd("gbVideoRam", 0, 0x4000))
+            + region("gbWorkRam", 0x8000) + region("gbVideoRam", 0x4000))
 
 
 def run_to_pc(m, pcs, max_frames):
@@ -165,7 +171,9 @@ def run(rom, scenario, outdir, translate=lambda spec: spec, gb_frames_addr=None,
         if inject is None and args.get("system") in ("gb", "gbc"):
             # Mesen fills RAM with random values at power-on, so two runs of the same scenario could
             # differ wherever a game reads memory it never wrote. Zero it, as a port powers on.
-            for kind, size in (("gbWorkRam", 0x8000), ("gbHighRam", 0x7F)):
+            sizes = {r["memory_type"]: r["size"] for r in st["memory_regions"]}   # DMG WRAM is 8 KiB
+            for kind in ("gbWorkRam", "gbHighRam"):
+                size = sizes[kind]
                 for a in range(0, size, 0x4000):
                     m.call("write_memory", {"memory_type": kind, "address": a, "hex": "00" * min(0x4000, size - a)})
             m.call("write_memory", {"memory_type": "gameboyMemory", "address": 0xFF30, "hex": "00" * 16})  # wave RAM

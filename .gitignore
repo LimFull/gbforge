@@ -4,8 +4,9 @@ roms/
 *.gbc
 *.sav
 *.srm
-# our own homebrew test ROMs are the only exception
+# test ROMs licensed for redistribution (our homebrew, acid2) are the only exception
 !tests/fixtures/**/*.gb
+!tests/fixtures/**/*.gbc
 
 # build output
 build/

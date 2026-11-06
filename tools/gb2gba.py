@@ -6,8 +6,8 @@
   gb2gba port ROM --output OUT.gba [--native-policy strict] [--no-scan] [--entry BB:AAAA]... [--cdl FILE] [--colour gbc|raw]
   gb2gba verify ROM PORT.gba --scenario SCENARIO.json --out DIR [--reuse-original]   (needs emucap)
 
-Exit codes: 0 ok, 2 invalid ROM, 3 unresolved paths (strict), 5 over budget, 6 external tool error,
-8 port differs from the original.
+Exit codes: 0 ok, 2 invalid ROM, 3 unresolved paths (strict), 4 cartridge not supported by the runtime,
+5 over budget, 6 external tool error, 8 port differs from the original.
 """
 import argparse
 import hashlib
@@ -162,6 +162,16 @@ def core(args):
     return r.returncode
 
 
+def runtime_gaps(header):
+    """Cartridge features the GBA runtime does not implement yet (README: Compatibility)."""
+    cart = header["cartridge_type"]
+    if cart["mapper"] not in ("ROM", "MBC5"):
+        return [f"{cart['name']} cartridge: the runtime has ROM-only and MBC5 so far"]
+    if header["ram_size"] > 8 << 10:
+        return [f"{header['ram_size'] >> 10} KiB cart RAM: the runtime maps one 8 KiB bank so far"]
+    return []
+
+
 def far_call_entries(rom):
     """Targets of constant far calls `LD HL,nn / LD B,bank / RST n` (either load order) through an RST
     handler that writes B to the MBC ROM bank register and then jumps to HL (DQ1&2's RST $10). Static
@@ -277,6 +287,10 @@ def cmd_port(args):
             json.dump(report, f, indent=2, sort_keys=True)
         return code
 
+    gaps = runtime_gaps(report["rom_header"])
+    if gaps:
+        print("unsupported: " + "; ".join(gaps), file=sys.stderr)
+        return finish(4, errors=gaps)
     report["far_call_entries"] = len(far_call_entries(rom))
     if core(["codegen", args.rom, gen, *analysis_args(args, rom)]) != 0:
         return finish(3, errors=["codegen failed (see stderr)"])

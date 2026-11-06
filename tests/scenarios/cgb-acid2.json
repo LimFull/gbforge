@@ -1,0 +1,7 @@
+{
+  "description": "cgb-acid2 (MIT, tests/fixtures/acid2): PPU reference picture, drawn every frame with LYC-timed register changes.",
+  "steps": [
+    {"step": 120},
+    {"shot": "face"}
+  ]
+}

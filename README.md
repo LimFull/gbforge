@@ -53,7 +53,7 @@ What the runtime covers today. A game that uses something in the right-hand colu
 
 | Area | Supported | Not yet |
 |---|---|---|
-| Cartridge | ROM only; MBC5 with one 8 KiB battery-backed RAM bank | MBC1/2/3 (incl. the MBC3 clock), MBC5 RAM banking. The first write to their MBC registers traps |
+| Cartridge | ROM only; MBC5 with one 8 KiB battery-backed RAM bank | MBC1/2/3 (incl. the MBC3 clock), MBC5 RAM banking. `port` refuses these with exit code 4 |
 | Model | DMG, CGB (palettes, VRAM/WRAM banks, HDMA) | CGB double speed (runs at normal speed) |
 | Video | BG, window, 8×8/8×16 sprites, DMG/CGB palettes, CGB colours adjusted for the GBA LCD (`--colour`) | BG priority bit, sprites behind BG, 10-sprites-per-line limit, mid-frame register changes (split status bars, wave effects) |
 | Sound | Register read-back and channel status (sound drivers keep running) | Audio output (all ports are silent) |
@@ -61,7 +61,9 @@ What the runtime covers today. A game that uses something in the right-hand colu
 | Code in RAM | The standard HRAM OAM-DMA routine and one I/O-wait idiom, replaced by native hooks | Any other routine executed from RAM traps |
 | Code coverage | Static analysis plus the code a recorded play-through executed (`--cdl`) | Paths neither found statically nor played are unresolved: the strict gate blocks the build, and `--allow-unresolved` builds them as traps |
 
-For a new game, check the cartridge type first (`gb2gba inspect`) and expect to record a play-through that covers the parts of the game you want to run.
+Public test ROMs: `tests/fixtures/acid2` holds dmg-acid2 and cgb-acid2 (MIT). Both build and run, but their pictures do not match the original yet; they exercise the video gaps above. Run the conversion steps below on them, using `tests/scenarios/{dmg,cgb}-acid2.json` as the route.
+
+For a new game, check the cartridge type first (`gb2gba inspect`; `port` stops with exit code 4 on an unsupported one) and expect to record a play-through that covers the parts of the game you want to run.
 
 ## Converting a game
 
@@ -152,7 +154,7 @@ gb2gba port roms/dragon-warrior-i-ii.gbc \
 | `0` | Passed |
 | `2` | Invalid or unsupported ROM |
 | `3` | Unresolved instruction/bank/dynamic path (blocked in strict mode) |
-| `4` | GB hardware feature not supported by the runtime (planned; today such features trap at run time) |
+| `4` | GB hardware feature not supported by the runtime (checked for the cartridge type; other features trap at run time) |
 | `5` | Code size / ROM / RAM budget exceeded |
 | `6` | External tool error (devkitARM, emucap, etc.) |
 | `7` | Plugin ROM fingerprint mismatch (planned) |
@@ -168,10 +170,11 @@ gb2gba port roms/dragon-warrior-i-ii.gbc \
 | **1** | ROM Inspect + analysis — header/SHA-256/banks, CFG/IR, `inspect`/`analyze` JSON | Identical JSON on repeated runs, clear exit codes |
 | **2** | Minimal strict native — registers/flags/memory/branches, starting with basic opcodes | Homebrew ROM runs as ARM code; missing paths error out |
 | **3** | GBC/RPG compatibility — CGB, MBC5, PPU/DMA/timer/IRQ, saves | DQ title → field → battle → save (compat) |
+| **3b** | Compatibility breadth — MBC1/2/3 (+ clock), MBC5 RAM banking, audio output, mid-frame register changes, BG/OBJ priority, 10 sprites per line | Public test ROMs (dmg-acid2, cgb-acid2) match the original; a second commercial game on MBC1 or MBC3 runs title → gameplay |
 | **4** | Expanded screen — 240×160 camera, map streaming, BG/DMA optimization | Wider world renders correctly on 3+ field maps |
 | **5** | Graphics upgrade — palette/tile/sprite replacement, UI relayout, 60 Hz | Reproducible build using only self-made art |
 
-Priority order: `GBA hello world → ROM inspect → static codegen running on GBA → GB runtime → DQ compat → 240×160 expansion → graphics upgrade`
+Priority order: `GBA hello world → ROM inspect → static codegen running on GBA → GB runtime → DQ compat → compatibility breadth → 240×160 expansion → graphics upgrade`
 
 ## Game plugins (planned)
 
@@ -203,5 +206,5 @@ The original screen is **not scaled up**; more tiles are drawn from the same wor
 
 - This repository **does not contain ROMs, commercial game assets, or code generated from commercial ROMs.** Scenarios for commercial games hold only inputs, labels and addresses.
 - It is a tool for converting ROMs the user legally owns, locally.
-- Tests use only homebrew ROMs licensed for redistribution.
+- Tests use only test ROMs licensed for redistribution: our own homebrew and the MIT-licensed acid2 ROMs (`tests/fixtures/acid2/LICENSE`).
 - Game plugins apply only to ROMs with an exact SHA-256 match and never patch other revisions with unverified addresses.

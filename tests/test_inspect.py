@@ -55,6 +55,18 @@ class InspectTest(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("too small", json.loads(r.stdout)["errors"][0])
 
+    def test_unsupported_cartridge_exit_code_4(self):
+        rom = bytearray(read(TINY))
+        rom[0x147] = 0x13                                  # MBC3+RAM+BATTERY
+        rom[0x14D] = (rom[0x14D] - 0x13) & 0xFF            # header checksum: (x - b - 1) per byte
+        tmp = os.path.join(ROOT, "build", "mbc3.gb")
+        with open(tmp, "wb") as f:
+            f.write(rom)
+        r = subprocess.run([sys.executable, CLI, "port", tmp, "--output", os.path.join(ROOT, "build", "mbc3.gba")],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 4)
+        self.assertIn("MBC3+RAM+BATTERY cartridge", r.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
