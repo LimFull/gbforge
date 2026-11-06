@@ -66,6 +66,28 @@ Public test ROMs:
 - `scripts/fetch_test_roms.sh` downloads mooneye-test-suite (MIT, pinned by SHA-256). It is too large for git.
 - `scripts/test_roms.py ROM...` records, ports and verifies each one against its original. Results are in [reports/phase4.md](reports/phase4.md).
 
+### MBC1 / MBC3 checklist
+
+MBC1 and MBC3 are implemented; the Phase 4 gate still needs a commercial game on each verified against the original.
+
+**MBC1**
+- [x] ROM bank: 5-bit low register (00 → 01) plus the 2-bit upper register, masked to the ROM size
+- [x] RAM enable; RAM banks 0-3 in mode 1 (32 KiB)
+- [x] mooneye `emulator-only/mbc1`: 10 of 13 match the original (`bits_bank1`, `bits_bank2`, `bits_mode`, `bits_ramg`, `ram_64kb`, `ram_256kb`, `rom_512kb`, `rom_1Mb`, `rom_2Mb`, `rom_4Mb`)
+- [ ] Mode 1 showing bank 20/40/60 at 0000-3FFF (≥ 1 MiB carts): `rom_8Mb`, `rom_16Mb`
+- [ ] MBC1M multicart wiring: `multicart_rom_8Mb`
+- [ ] A commercial MBC1 game verified against the original
+
+**MBC3**
+- [x] 7-bit ROM bank (00 → 01), RAM enable, RAM banks 0-3
+- [x] Clock registers 08-0C (seconds, minutes, hours, day low, day high with halt and carry), latch on 00 → 01
+- [x] Clock counts real time from GBA VBlanks while the game runs, and is saved after cart RAM when it fits in GBA SRAM
+- [ ] Time that passes while the console is off (needs a real-time clock on the GBA cart)
+- [ ] Clock saved on 32 KiB RAM carts (cart RAM fills GBA SRAM; `port` warns)
+- [ ] MBC30 (8 RAM banks)
+- [ ] Any MBC3 test run against the original (mooneye has no MBC3 tests; the code has only been reviewed)
+- [ ] A commercial MBC3 game verified against the original (Pokémon Red/Blue; Gold/Silver/Crystal for the clock)
+
 For a new game, check the cartridge type first (`gb2gba inspect`; `port` stops with exit code 4 on an unsupported one) and expect to record a play-through that covers the parts of the game you want to run.
 
 ## Converting a game
