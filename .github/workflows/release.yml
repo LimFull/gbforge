@@ -54,7 +54,7 @@ jobs:
 
           Commercial games need a recorded play-through for full coverage; see [Converting a game](https://github.com/LimFull/gbforge#converting-a-game).
 
-          - **macOS** (Apple Silicon): signed and notarized. Download with `curl -LO` and `unzip` in Terminal; after a browser download run `xattr -dr com.apple.quarantine gbforge-*-macos-arm64` once, or macOS stops the bundled compiler.
+          - **macOS** (Apple Silicon): signed and notarized. After a browser download macOS asks once whether to open `gbforge`: choose **Open**. Downloading with `curl -LO` skips the prompt.
           - **Windows** (x64): not code-signed. If SmartScreen stops it, choose **More info → Run anyway**.
           - **Linux** (x64, glibc 2.35+).
           EOF
