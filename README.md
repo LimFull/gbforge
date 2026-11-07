@@ -18,7 +18,14 @@ gbforge inspect game.gbc                     # mapper, CGB flag, sizes
 gbforge port game.gbc --output game.gba
 ```
 
-On Windows run `gbforge.exe`; the bundle is not code-signed, so if SmartScreen stops it choose **More info → Run anyway**. The macOS bundle is signed and notarized.
+On Windows run `gbforge.exe`; the bundle is not code-signed, so if SmartScreen stops it choose **More info → Run anyway**. The macOS bundle is signed and notarized; download it in Terminal so macOS does not quarantine the bundled compiler:
+
+```bash
+curl -LO https://github.com/LimFull/gbforge/releases/download/v0.1.0/gbforge-0.1.0-macos-arm64.zip
+unzip gbforge-0.1.0-macos-arm64.zip && cd gbforge-0.1.0-macos-arm64
+```
+
+If you downloaded it with a browser instead, run `xattr -dr com.apple.quarantine gbforge-0.1.0-macos-arm64` once after unzipping.
 
 **From source** you need Python 3.12+, CMake, Ninja and a C++ compiler. `scripts/fetch_toolchain.py` downloads the pinned [Arm GNU Toolchain](https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads) (about 150 MB on macOS and Linux, 300 MB on Windows) and builds libtonc with it, both checked by SHA-256.
 

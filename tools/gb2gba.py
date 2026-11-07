@@ -196,8 +196,12 @@ def build_gba(gen, out, base, title, cflags):
     rsp = os.path.join(objdir, "objs.rsp")  # Windows: the object list can exceed the command-line limit
     with open(rsp, "w") as f:
         f.write("\n".join('"' + o.replace("\\", "/") + '"' for o in objs))
-    link = [gcc, "-mthumb", "-mcpu=arm7tdmi", "-nostartfiles", "-T", os.path.join(rt, "gba.ld"), "@" + rsp,
-            "-L", tonc, "-ltonc", "-Wl,--gc-sections,--no-warn-rwx-segments,-Map," + base + ".map", "-o", elf]
+    # The same bytes on every host: fetch_toolchain's debug-free libgcc/libc, no LTO plugin (see gba_libs)
+    lib = os.path.join(TOOLCHAIN, "lib")
+    link = [gcc, "-mthumb", "-mcpu=arm7tdmi", "-nostartfiles", "-nostdlib", "-fno-use-linker-plugin",
+            "-T", os.path.join(rt, "gba.ld"), "@" + rsp, "-L", tonc, "-ltonc", "-Wl,--start-group",
+            os.path.join(lib, "libgcc.a"), os.path.join(lib, "libc.a"), "-Wl,--end-group",
+            "-Wl,--gc-sections,--no-warn-rwx-segments,-Map," + base + ".map", "-o", elf]
     if subprocess.run(link).returncode or subprocess.run([arm_tool("objcopy"), "-O", "binary", elf, out]).returncode:
         return False
     with open(out, "r+b") as f:  # header: title, then the complement check over 0xA0-0xBC
@@ -599,7 +603,11 @@ def cmd_verify(args):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="gb2gba")
+    if FROZEN and sys.platform == "darwin":
+        # Archive Utility quarantines every file it unzips, and Gatekeeper does not pass the helpers gcc
+        # starts (cc1, as) the way it passed this launcher. The bundle is signed and notarized as a whole.
+        subprocess.run(["xattr", "-dr", "com.apple.quarantine", ROOT], stderr=subprocess.DEVNULL)
+    p = argparse.ArgumentParser(prog="gbforge" if FROZEN else "gb2gba")
     sub = p.add_subparsers(dest="cmd", required=True)
     i = sub.add_parser("inspect", help="parse ROM header, hashes, mapper")
     i.add_argument("rom")

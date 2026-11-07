@@ -28,16 +28,15 @@ KEEP = [  # Arm GNU Toolchain files `port` runs (gcc -mthumb -mcpu=arm7tdmi sele
     "bin/arm-none-eabi-gcc{exe}", "bin/arm-none-eabi-objcopy{exe}", "bin/arm-none-eabi-nm{exe}", "bin/*.dll",
     "arm-none-eabi/bin/as{exe}", "arm-none-eabi/bin/ld{exe}", "arm-none-eabi/bin/*.dll",
     "libexec/gcc/arm-none-eabi/{gcc}/cc1{exe}", "libexec/gcc/arm-none-eabi/{gcc}/collect2{exe}",
-    "libexec/gcc/arm-none-eabi/{gcc}/lto-wrapper{exe}", "libexec/gcc/arm-none-eabi/{gcc}/liblto_plugin*",
     "libexec/gcc/arm-none-eabi/{gcc}/*.dll",
     "lib/gcc/arm-none-eabi/{gcc}/include/**", "lib/gcc/arm-none-eabi/{gcc}/include-fixed/**",
-    "lib/gcc/arm-none-eabi/{gcc}/thumb/nofp/*",
-    "arm-none-eabi/include/*.h", "arm-none-eabi/include/[!c]*/**", "arm-none-eabi/lib/thumb/nofp/lib[cm].a",
-]
+    "arm-none-eabi/include/*.h", "arm-none-eabi/include/[!c]*/**", "license.txt",
+]  # port links fetch_toolchain's lib/ (libgcc, libc) and tonc/
 NOTICE = """gbforge bundles third-party software; each directory keeps its own licence.
 
 toolchain/arm   Arm GNU Toolchain {arm} (GCC, binutils, newlib), unmodified binaries with unused files
-                removed. GCC and binutils are GPL-3.0; newlib is under BSD-style licences. Source code:
+toolchain/lib   removed; lib/ holds its libgcc and libc without debug info. GCC and binutils are GPL-3.0
+                (libgcc: GCC Runtime Library Exception); newlib is under BSD-style licences. Source code:
                 https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads
 toolchain/tonc  libtonc {tonc} (MIT, toolchain/tonc/LICENSE), https://github.com/gbadev-org/libtonc
 core            gbforge-core links gb-recompiled {gbr} (MIT, LICENSES/gb-recompiled.txt),
@@ -112,7 +111,8 @@ def main():
     shutil.copy2(os.path.join(core_build, "gbforge-core" + gb2gba.EXE), os.path.join(stage, "core"))
     shutil.copytree(os.path.join(ROOT, "runtime-gba"), os.path.join(stage, "runtime-gba"))
     src = os.path.join(ROOT, "build", "toolchain")
-    shutil.copytree(os.path.join(src, "tonc"), os.path.join(stage, "toolchain", "tonc"))
+    for d in ("tonc", "lib"):
+        shutil.copytree(os.path.join(src, d), os.path.join(stage, "toolchain", d))
     for pattern in KEEP:
         for f in glob.glob(os.path.join(src, "arm", pattern.format(exe=gb2gba.EXE, gcc=GCC_VER)), recursive=True):
             if os.path.isfile(f):

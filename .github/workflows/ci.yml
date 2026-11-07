@@ -34,10 +34,25 @@ jobs:
       - run: cmake -G Ninja -B build/core . && cmake --build build/core --target gbforge-core
       - run: python tools/gb2gba.py analyze tests/fixtures/tiny/tiny.gb --out build/tiny
       - run: python tools/gb2gba.py port tests/fixtures/tiny/tiny.gb --output out/tiny.gba
+      - run: python tools/gb2gba.py port tests/fixtures/acid2/cgb-acid2.gbc --output out/cgb-acid2.gba --allow-unresolved
       - uses: actions/upload-artifact@v7
         with:
-          name: tiny-${{ runner.os }}
+          name: port-${{ runner.os }}
           path: |
-            out/tiny.gba
+            out/*.gba
             out/tiny.map.json
             out/tiny.report.json
+
+  # A patch made against a port (e.g. a translation) only applies if every host builds the same bytes
+  same-bytes:
+    needs: port-smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: port-*
+      - run: |
+          sha256sum port-*/*.gba | sort -k2
+          for g in tiny cgb-acid2; do
+            [ "$(sha256sum port-*/$g.gba | cut -d' ' -f1 | sort -u | wc -l)" = 1 ] || { echo "$g.gba differs between hosts"; exit 1; }
+          done

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Fetch the GBA toolchain that `gb2gba port` builds with: the pinned Arm GNU Toolchain (DEST/arm)
-and libtonc built from pinned source with it (DEST/tonc). Both are checksum-verified.
+"""Fetch the GBA toolchain that `gb2gba port` builds with: the pinned Arm GNU Toolchain (DEST/arm),
+its libgcc and libc for the GBA without debug info (DEST/lib), and libtonc built from pinned source
+with it (DEST/tonc). Downloads are checksum-verified.
 
 usage: scripts/fetch_toolchain.py [DEST]     (default build/toolchain)
 """
@@ -90,6 +91,19 @@ def build_tonc(arm, src, out):
     shutil.copy(os.path.join(src, "license.txt"), os.path.join(out, "LICENSE"))
 
 
+def gba_libs(arm, out):
+    """libgcc.a and libc.a of the multilib port links use, stripped of debug info. Arm builds them on each
+    host and the copies differ only in debug sections; those shift ld's section ids, which name its
+    interworking stubs and so set their order. Without them every host links the same bytes."""
+    gcc = os.path.join(arm, "bin", "arm-none-eabi-gcc" + EXE)
+    os.makedirs(out, exist_ok=True)
+    for name in ("libgcc.a", "libc.a"):
+        lib = subprocess.run([gcc, "-mthumb", "-mcpu=arm7tdmi", "-print-file-name=" + name],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        subprocess.run([os.path.join(arm, "bin", "arm-none-eabi-objcopy" + EXE), "--strip-debug", lib,
+                        os.path.join(out, name)], check=True)
+
+
 def main():
     dest = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "build", "toolchain"))
     key = (platform.system(), platform.machine())
@@ -107,6 +121,7 @@ def main():
         unpack(os.path.join(dl, name), arm)
         with open(stamp, "w") as f:
             f.write(name)
+    gba_libs(arm, os.path.join(dest, "lib"))
     tonc = os.path.join(dl, f"libtonc-{TONC_COMMIT}.tar.gz")
     fetch(f"https://github.com/gbadev-org/libtonc/archive/{TONC_COMMIT}.tar.gz", TONC_SHA256, tonc)
     src = os.path.join(dest, "tonc-src")
