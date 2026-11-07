@@ -11,10 +11,16 @@
 
 ## Quick start
 
-You need:
-- Python 3, CMake, Ninja and a C++ compiler
-- devkitARM, installed natively or run through the `devkitpro/devkitarm` Docker image (`scripts/dkarm.sh` picks one)
-- [mGBA](https://mgba.io/) or a flash cart, to play the result
+**Download** the zip for your OS from [Releases](https://github.com/LimFull/gbforge/releases) (Windows x64, macOS Apple Silicon, Linux x64), unzip it and run `gbforge` in a terminal. Nothing else to install: the bundle carries its own GBA compiler.
+
+```bash
+gbforge inspect game.gbc                     # mapper, CGB flag, sizes
+gbforge port game.gbc --output game.gba
+```
+
+On Windows run `gbforge.exe`; the bundle is not code-signed, so if SmartScreen stops it choose **More info → Run anyway**. The macOS bundle is signed and notarized.
+
+**From source** you need Python 3.12+, CMake, Ninja and a C++ compiler. `scripts/fetch_toolchain.py` downloads the pinned [Arm GNU Toolchain](https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads) (about 150 MB on macOS and Linux, 300 MB on Windows) and builds libtonc with it, both checked by SHA-256.
 
 Recording a play-through and verifying need a little more:
 - [emucap](https://github.com/mcpads/emucap) with its Mesen2 host (`adapters/mesen2/build.sh`)
@@ -23,9 +29,10 @@ Recording a play-through and verifying need a little more:
 
 ```bash
 git clone https://github.com/LimFull/gbforge.git && cd gbforge
-cp local.env.example local.env            # paths to emucap, Mesen and the GBA BIOS
-scripts/setup-check.sh                    # reports what is missing
+scripts/fetch_toolchain.py                # GBA compiler + libtonc into build/toolchain
 cmake -G Ninja -B build/core . && ninja -C build/core gbforge-core   # analyzer + code generator; fetches gb-recompiled (pinned)
+cp local.env.example local.env            # paths to emucap, Mesen and the GBA BIOS (recording and verifying only)
+scripts/setup-check.sh                    # reports what is missing
 
 tools/gb2gba.py port tests/fixtures/tiny/tiny.gb --output out/tiny.gba   # the bundled test ROM
 ```
@@ -40,7 +47,7 @@ Run the result in mGBA:
 
 On real hardware, copy the `.gba` to a flash cart (EZ-Flash, Everdrive GBA, etc.). Games keep their save in the cart's SRAM: the ROM carries the `SRAM_V113` marker, so carts and emulators pick 32 KiB SRAM.
 
-Then convert your own ROM by following [Converting a game](#converting-a-game). Static analysis alone rarely finds all of a commercial game's code, so record a play-through of the parts you want to run first.
+Then convert your own ROM by following [Converting a game](#converting-a-game). With a release bundle, run `gbforge` where the steps say `tools/gb2gba.py`; recording (steps 3–4) and verifying (step 7) need a source checkout and emucap. Static analysis alone rarely finds all of a commercial game's code, so record a play-through of the parts you want to run first.
 
 ## Converting a game
 
@@ -175,7 +182,7 @@ How `gb2gba verify` compares a port with its original under emucap (Mesen2 for b
 | `3` | Unresolved paths (the strict build refuses them) |
 | `4` | Cartridge type not supported by the runtime |
 | `5` | Code size / ROM / RAM budget exceeded |
-| `6` | External tool error (devkitARM, emucap, etc.) |
+| `6` | External tool error (GBA compiler, emucap, etc.) |
 | `8` | Port differs from the original during verification |
 
 ## Roadmap
@@ -200,8 +207,9 @@ scripts/fetch_test_roms.sh                # mooneye-test-suite into build/test-r
 scripts/test_roms.py tests/fixtures/acid2/*.gb* build/test-roms/mts-*/emulator-only/mbc*/*.gb   # record, port, verify each
 
 make -C tests/fixtures/tiny               # rebuild the test ROM (needs RGBDS)
-scripts/dkarm.sh make -C examples/hello-gba   # Phase 0 smoke test
 ```
+
+Releases: pushing a `vX.Y.Z` tag (matching `TOOL_VERSION` in `tools/gb2gba.py`) makes CI build the Windows and Linux bundles into a draft release. The macOS bundle is built, signed and notarized on a Mac (`scripts/package.py --sign`, `NOTARY_PROFILE` in `local.env`), then added with `gh release upload vX.Y.Z dist/gbforge-*-macos-arm64.zip` before the draft is published.
 
 `scripts/test_roms.py` keeps each original's recording, so a rerun only ports and plays the port again (`--fresh` redoes it).
 
@@ -233,7 +241,7 @@ The GBA's GB compatibility mode is a separate hardware mode. gbforge produces **
    │                     + coverage of a recorded play-through (Mesen CDL), code copied to RAM
    ├─ IR / Metadata ──── functions/edges keyed by (rom_bank, gb_pc), unresolved marked
    │
-   ├─ Native Codegen (IR → C → devkitARM)
+   ├─ Native Codegen (IR → C → arm-none-eabi-gcc)
    │
    ├─ GBA Runtime ────── GB CPU semantics / MBC / Timer / IRQ / PPU / APU / Input / Save
    │
@@ -257,7 +265,7 @@ The GBA's GB compatibility mode is a separate hardware mode. gbforge produces **
 | [mgbdis](https://github.com/mattcurrie/mgbdis) | GB ROM disassembler |
 | [mGBA](https://mgba.io/) · [SameBoy](https://github.com/LIJI32/SameBoy) | GBA run verification · GB reference comparison |
 | [emucap](https://github.com/mcpads/emucap) | Agent/MCP control of Mesen2 for both GB/GBC and GBA — original ↔ port differential checks (GPL; used only as an external process) |
-| [devkitPro / devkitARM](https://devkitpro.org/wiki/Getting_Started) | GBA cross-compilation |
+| [Arm GNU Toolchain](https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads) · [libtonc](https://github.com/gbadev-org/libtonc) | GBA cross-compilation (GCC, newlib) · GBA hardware library |
 
 ## Copyright / ROM policy
 

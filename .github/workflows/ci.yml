@@ -11,22 +11,33 @@ jobs:
           python-version: "3.12"
       - run: python -m unittest discover -s tests -v
 
-  # gbforge-core (analyzer + codegen) and both GBA builds, in the devkitARM image
+  # gbforge-core (analyzer + codegen) and a GBA build with the pinned Arm GNU Toolchain, on each host OS
   port-smoke:
-    runs-on: ubuntu-latest
-    container: devkitpro/devkitarm
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - run: apt-get update && apt-get install -y --no-install-recommends cmake ninja-build python3 git ca-certificates
       - uses: actions/checkout@v7
-      - run: cmake -G Ninja -B build/core . && ninja -C build/core gbforge-core
-      - run: make -C examples/hello-gba
-      - run: python3 tools/gb2gba.py analyze tests/fixtures/tiny/tiny.gb --out build/tiny
-      - run: python3 tools/gb2gba.py port tests/fixtures/tiny/tiny.gb --output out/tiny.gba
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install ninja
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - uses: actions/cache@v6
+        with:
+          path: build/toolchain
+          key: toolchain-${{ runner.os }}-${{ hashFiles('scripts/fetch_toolchain.py') }}
+      - run: python scripts/fetch_toolchain.py
+      - run: cmake -G Ninja -B build/core . && cmake --build build/core --target gbforge-core
+      - run: python tools/gb2gba.py analyze tests/fixtures/tiny/tiny.gb --out build/tiny
+      - run: python tools/gb2gba.py port tests/fixtures/tiny/tiny.gb --output out/tiny.gba
       - uses: actions/upload-artifact@v7
         with:
-          name: gba
+          name: tiny-${{ runner.os }}
           path: |
-            examples/hello-gba/hello.gba
             out/tiny.gba
             out/tiny.map.json
             out/tiny.report.json

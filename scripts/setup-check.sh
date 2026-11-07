@@ -18,11 +18,7 @@ need cmake    "cmake --version"
 need ninja    "ninja --version"
 need python3  "python3 --version"
 need rgbds    "rgbasm --version"
-if [ -n "$DEVKITARM" ]; then
-  need devkitARM "$DEVKITARM/bin/arm-none-eabi-gcc --version"
-else
-  need devkitARM "docker run --rm devkitpro/devkitarm sh -c '\$DEVKITARM/bin/arm-none-eabi-gcc --version' | sed 's/^/docker: /'"
-fi
+need toolchain "\"$root/build/toolchain/arm/bin/arm-none-eabi-gcc\" --version"   # scripts/fetch_toolchain.py
 need mGBA     "\"${MGBA:-/Applications/mGBA.app/Contents/MacOS/mGBA}\" --version | sed 's/.*mGBA //'"
 need emucap   "test -x \"${EMUCAP_MCP:-$(command -v emucap-mcp)}\" && echo \"${EMUCAP_MCP:-$(command -v emucap-mcp)}\""
 need Mesen2   "test -x \"$MESEN_BIN\" && grep -o '\"tag\": *\"[^\"]*\"' \"$(dirname "$MESEN_BIN")/emucap-mesen-build.json\""

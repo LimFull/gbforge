@@ -34,3 +34,4 @@ __pycache__/
 
 # machine-specific paths
 local.env
+dist/

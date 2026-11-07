@@ -10,6 +10,7 @@ Exit codes: 0 ok, 2 invalid ROM, 3 unresolved paths (strict), 4 cartridge not su
 5 over budget, 6 external tool error, 8 port differs from the original.
 """
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -18,13 +19,19 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CORE = os.environ.get("GBFORGE_CORE", os.path.join(ROOT, "build", "core", "gbforge-core"))
+FROZEN = getattr(sys, "frozen", False)  # release bundle (scripts/package.py): tools sit next to the executable
+ROOT = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+EXE = ".exe" if os.name == "nt" else ""
+CORE = os.environ.get("GBFORGE_CORE", os.path.join(ROOT, *([] if FROZEN else ["build"]), "core", "gbforge-core" + EXE))
+TOOLCHAIN = os.environ.get("GBFORGE_TOOLCHAIN", os.path.join(ROOT, *([] if FROZEN else ["build"]), "toolchain"))
+WORK = os.path.join(tempfile.gettempdir(), "gbforge") if FROZEN else os.path.join(ROOT, "build", "port")  # port's generated C, objects
 GBA_ROM_LIMIT = 32 << 20
 
-TOOL_VERSION = "0.0.1"
+TOOL_VERSION = "0.1.0"
 
 # Pan Docs "The Cartridge Header" — 0147 cartridge type
 CART_TYPES = {
@@ -160,6 +167,46 @@ def core(args):
     if r.returncode not in (0, 3):
         sys.stderr.write(r.stderr[-2000:])
     return r.returncode
+
+
+def arm_tool(name):
+    """A binary of the Arm GNU Toolchain fetched by scripts/fetch_toolchain.py."""
+    path = os.path.join(TOOLCHAIN, "arm", "bin", f"arm-none-eabi-{name}{EXE}")
+    if not os.path.exists(path):
+        raise SystemExit(f"{path} missing: run scripts/fetch_toolchain.py")
+    return path
+
+
+def build_gba(gen, out, base, title, cflags):
+    """Compile runtime + generated code and link OUT.gba, with BASE.elf/.map/.sym. True on success."""
+    rt, tonc = os.path.join(ROOT, "runtime-gba"), os.path.join(TOOLCHAIN, "tonc")
+    gcc, objdir = arm_tool("gcc"), os.path.join(os.path.dirname(gen), "obj")
+    shutil.rmtree(objdir, ignore_errors=True)
+    os.makedirs(objdir)
+    cc = [gcc, "-mthumb", "-mcpu=arm7tdmi", "-O2", "-g", "-Wall", "-Wno-unused-label", "-ffunction-sections",
+          "-I", rt, "-I", os.path.join(tonc, "include"), *cflags, "-c"]
+    srcs = [os.path.join(rt, "gb.c"), os.path.join(rt, "crt0.s"), *sorted(glob.glob(os.path.join(gen, "*.c"))),
+            os.path.join(gen, "rom.s")]
+    objs = [os.path.join(objdir, os.path.basename(s) + ".o") for s in srcs]
+    # cwd=gen: rom.s .incbin's its neighbours by relative name
+    with ThreadPoolExecutor(os.cpu_count()) as ex:
+        if any(r.returncode for r in ex.map(lambda so: subprocess.run([*cc, so[0], "-o", so[1]], cwd=gen), zip(srcs, objs))):
+            return False
+    elf = base + ".elf"
+    rsp = os.path.join(objdir, "objs.rsp")  # Windows: the object list can exceed the command-line limit
+    with open(rsp, "w") as f:
+        f.write("\n".join('"' + o.replace("\\", "/") + '"' for o in objs))
+    link = [gcc, "-mthumb", "-mcpu=arm7tdmi", "-nostartfiles", "-T", os.path.join(rt, "gba.ld"), "@" + rsp,
+            "-L", tonc, "-ltonc", "-Wl,--gc-sections,--no-warn-rwx-segments,-Map," + base + ".map", "-o", elf]
+    if subprocess.run(link).returncode or subprocess.run([arm_tool("objcopy"), "-O", "binary", elf, out]).returncode:
+        return False
+    with open(out, "r+b") as f:  # header: title, then the complement check over 0xA0-0xBC
+        f.seek(0xA0)
+        f.write(title.encode().ljust(12, b"\0"))
+        f.seek(0xA0)
+        f.write(bytes([(-sum(f.read(0x1D)) - 0x19) & 0xFF]))
+    with open(base + ".sym", "w") as f:
+        return subprocess.run([arm_tool("nm"), elf], stdout=f).returncode == 0
 
 
 def runtime_gaps(header):
@@ -322,7 +369,8 @@ def cmd_port(args):
     rom, report = inspect_or_exit(args.rom)
     out = os.path.abspath(args.output)
     stem = os.path.splitext(os.path.basename(out))[0]
-    work = os.path.join(ROOT, "build", "port", stem)
+    work = os.path.join(WORK, stem)
+    aux = os.path.join(work, stem) if FROZEN else os.path.splitext(out)[0]  # .elf/.map/.sym/.map.json (verify, scripts)
     gen = os.path.join(work, "gen")
     shutil.rmtree(gen, ignore_errors=True)
     os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -376,21 +424,18 @@ def cmd_port(args):
         f.write('.section .rodata\n.global gb_rom\n.balign 4\ngb_rom:\n.incbin "rom.gb"\n'
                 '.global gb_colour\n.balign 2\ngb_colour:\n.incbin "colour.bin"\n')
     title = re.sub(r"[^A-Z0-9]", "", report["rom_header"]["title"].upper())[:12] or "GBFORGE"
-    make = [os.path.join(ROOT, "scripts", "dkarm.sh"), "make", "-s", f"-j{os.cpu_count() or 4}",
-            "-C", os.path.join(ROOT, "runtime-gba"), f"GEN={gen}", f"OUT={out}", f"TITLE={title}"]
     if args.profile:
-        make.append("EXTRA_CFLAGS=-DGB_PROFILE")
         report.setdefault("warnings", []).append("profiling build (timer IRQ sampler)")
-    for stale in (out, os.path.splitext(out)[0] + ".map.json"):
+    for stale in (out, aux + ".map.json"):
         if os.path.exists(stale):
             os.remove(stale)  # never leave a previous build behind a failed one
-    if subprocess.run(make).returncode != 0:
+    if not build_gba(gen, out, aux, title, ["-DGB_PROFILE"] if args.profile else []):
         return finish(6, errors=["GBA build failed"])
     size = os.path.getsize(out)
     report["build_sizes"] = {"gba_bytes": size}
     if size > GBA_ROM_LIMIT:
         return finish(5, errors=[f"{size} bytes exceeds the 32 MiB GBA ROM limit"])
-    write_map(os.path.splitext(out)[0] + ".sym", os.path.splitext(out)[0] + ".map.json", report["rom_header"])
+    write_map(aux + ".sym", aux + ".map.json", report["rom_header"])
     print(f"{out}: {size} bytes, {cg['functions']} GB functions, "
           + ("strict gate BYPASSED" if report.get("gate") == "bypassed" else "strict native"))
     return finish(0)
@@ -514,6 +559,8 @@ def same_picture(gb_png, gba_png, tolerance=0, expect=None):
 
 
 def cmd_verify(args):
+    if FROZEN:
+        raise SystemExit("verify needs a source checkout and emucap (README: Quick start)")
     sys.path.insert(0, os.path.join(ROOT, "scripts"))
     import emucap_run
     with open(args.scenario) as f:

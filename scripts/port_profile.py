@@ -16,7 +16,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mcp_client import Mcp  # noqa: E402
 import emucap_run  # noqa: E402
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+import gb2gba  # noqa: E402
 
 
 def main(port, scenario, top):
@@ -54,8 +55,7 @@ def main(port, scenario, top):
             m.call("stop", {"launch_id": lid})
     start = end - min(end - (start or 0), prof["size"])
     pcs = [int.from_bytes(buf[4 * (i % prof["size"]):4 * (i % prof["size"]) + 4], "little") for i in range(start, end)]
-    out = subprocess.run([os.path.join(ROOT, "scripts", "dkarm.sh"), "sh", "-c",
-                          "$DEVKITARM/bin/arm-none-eabi-addr2line -i -a -e " + base + ".elf " + " ".join(hex(p) for p in pcs)],
+    out = subprocess.run([gb2gba.arm_tool("addr2line"), "-i", "-a", "-e", base + ".elf", *(hex(p) for p in pcs)],
                          capture_output=True, text=True).stdout.split("\n")
     # -a prints the address line first; the last source line before the next address is the outermost
     outer, cur = [], None

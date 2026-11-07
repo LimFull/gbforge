@@ -1,0 +1,60 @@
+# Tag vX.Y.Z → Windows and Linux bundles (scripts/package.py) in a draft release. The macOS bundle is
+# signed and notarized on a Mac and added to the same draft: scripts/package.py --sign, gh release upload.
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  package:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-22.04]   # 22.04: the Linux bundle runs on glibc 2.35 and newer
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: pip install ninja pyinstaller==6.22.3
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - run: python scripts/package.py
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bundle-${{ runner.os }}
+          path: dist/*.zip
+
+  draft:
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+          path: dist
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.zip --clobber -R "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" dist/*.zip --draft --title "gbforge $TAG" -R "$GITHUB_REPOSITORY" --notes "$(cat <<'EOF'
+          Download the zip for your OS, unzip it, and run `gbforge` from a terminal. Nothing else to install.
+
+          ```
+          gbforge inspect game.gbc
+          gbforge port game.gbc --output game.gba
+          ```
+
+          Commercial games need a recorded play-through for full coverage; see [Converting a game](https://github.com/LimFull/gbforge#converting-a-game).
+
+          - **macOS** (Apple Silicon): signed and notarized.
+          - **Windows** (x64): not code-signed. If SmartScreen stops it, choose **More info → Run anyway**.
+          - **Linux** (x64, glibc 2.35+).
+          EOF
+          )"
+          fi
