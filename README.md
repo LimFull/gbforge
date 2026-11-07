@@ -180,6 +180,25 @@ How `gb2gba verify` compares a port with its original under emucap (Mesen2 for b
   - `shot_tolerance` in a scenario allows a few pixels for blinking cursors.
 - **Speed:** the emulator runs unthrottled, since scenarios count frames, not wall time. The Dragon Quest P3 comparison takes about 5.5 minutes. [reports/phase4.md §7.1](reports/phase4.md) has the details.
 
+## Patching a port
+
+Translations and other binary patches can be made against a port's `.gba`:
+
+- The same gbforge version, ROM, CDL and options give the same `.gba` bytes on Windows, macOS and Linux; CI checks this on every push. `port` prints the SHA-256 (also `gba_sha256` in the report) for players to check before patching. Ship the CDL and the exact `port` command with the patch.
+- A source checkout writes the symbol table next to the `.gba` (`game.sym`, `nm` format), so hooks can look up runtime symbols instead of hard-coding addresses.
+- The runtime leaves these GBA resources alone:
+
+  | Resource | Free for patches |
+  |---|---|
+  | EWRAM | Above `__end__` (in `game.sym`); the runtime has no heap |
+  | OAM | Entries 40–127 (GB sprites use 0–39) |
+  | OBJ tiles | 512 and up (`0x06014000`–) |
+  | BG tiles | Char block 2 (`0x06008000`–`0x0600BFFF`), except on the trap screen |
+  | Screen blocks | 31, except on the trap screen |
+  | Palettes | BG 8–14, OBJ 8–15 |
+
+- Release notes say when a release changes any of the above, or the names and layout of runtime symbols that hooks use.
+
 ## Exit codes
 
 | Exit code | Meaning |

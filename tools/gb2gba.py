@@ -437,11 +437,14 @@ def cmd_port(args):
         return finish(6, errors=["GBA build failed"])
     size = os.path.getsize(out)
     report["build_sizes"] = {"gba_bytes": size}
+    with open(out, "rb") as f:  # the same inputs give these bytes on every host (README: Patching a port)
+        report["gba_sha256"] = hashlib.sha256(f.read()).hexdigest()
     if size > GBA_ROM_LIMIT:
         return finish(5, errors=[f"{size} bytes exceeds the 32 MiB GBA ROM limit"])
     write_map(aux + ".sym", aux + ".map.json", report["rom_header"])
     print(f"{out}: {size} bytes, {cg['functions']} GB functions, "
           + ("strict gate BYPASSED" if report.get("gate") == "bypassed" else "strict native"))
+    print(f"sha256 {report['gba_sha256']}")
     return finish(0)
 
 
