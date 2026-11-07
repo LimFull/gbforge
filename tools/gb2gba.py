@@ -20,6 +20,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import zipfile
 import zlib
 from concurrent.futures import ThreadPoolExecutor
 
@@ -29,9 +30,10 @@ EXE = ".exe" if os.name == "nt" else ""
 CORE = os.environ.get("GBFORGE_CORE", os.path.join(ROOT, *([] if FROZEN else ["build"]), "core", "gbforge-core" + EXE))
 TOOLCHAIN = os.environ.get("GBFORGE_TOOLCHAIN", os.path.join(ROOT, *([] if FROZEN else ["build"]), "toolchain"))
 WORK = os.path.join(tempfile.gettempdir(), "gbforge") if FROZEN else os.path.join(ROOT, "build", "port")  # port's generated C, objects
+SELF = [sys.executable] if FROZEN else [sys.executable, os.path.abspath(__file__)]
 GBA_ROM_LIMIT = 32 << 20
 
-TOOL_VERSION = "0.1.0"
+TOOL_VERSION = "0.2.0"
 
 # Pan Docs "The Cartridge Header" — 0147 cartridge type
 CART_TYPES = {
@@ -605,6 +607,50 @@ def cmd_verify(args):
     return 0 if ok else 8
 
 
+def cmd_convert(args):
+    """Player-facing port (the Convert ROM launchers): GAME.gba next to each ROM or .zip, GAME.cdl used
+    when it is there, unresolved paths allowed, compiler output replaced by a short summary."""
+    code = 0
+    for path in map(os.path.abspath, args.roms):
+        rom, base = path, os.path.splitext(path)[0]
+        print(f"{os.path.basename(path)}: converting, this can take a minute ...", flush=True)
+        if path.lower().endswith(".zip"):
+            with zipfile.ZipFile(path) as z:
+                names = [n for n in z.namelist() if n.lower().endswith((".gb", ".gbc"))]
+                if not names:
+                    print("  Failed: no .gb or .gbc file inside the zip")
+                    code = code or 2
+                    continue
+                os.makedirs(WORK, exist_ok=True)
+                rom = os.path.join(WORK, os.path.basename(names[0]))
+                with open(rom, "wb") as f:
+                    f.write(z.read(names[0]))
+            base = os.path.join(os.path.dirname(path), os.path.splitext(os.path.basename(rom))[0])
+        cmd = [*SELF, "port", rom, "--output", base + ".gba", "--allow-unresolved"]
+        if os.path.exists(base + ".cdl"):
+            cmd += ["--cdl", base + ".cdl"]
+        if os.path.exists(base + ".report.json"):
+            os.remove(base + ".report.json")  # a summary must not come from an earlier run
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        rep = {}
+        if os.path.exists(base + ".report.json"):
+            with open(base + ".report.json") as f:
+                rep = json.load(f)
+        if r.returncode:
+            why = rep.get("errors") or [l for l in (r.stderr + r.stdout).splitlines() if l.strip()][-3:]
+            print(f"  Failed (code {r.returncode}): " + "; ".join(why))
+            code = code or r.returncode
+            continue
+        print(f"  Created {base}.gba")
+        print(f"  SHA-256 {rep['gba_sha256']}")
+        if "--cdl" in cmd:
+            print(f"  Used {base}.cdl")
+        if rep.get("gate") == "bypassed":
+            print(f"  Note: {rep['unresolved_edges']} code paths were not found. If the game reaches one, it stops "
+                  "on a 'gbforge trap' screen (GUIDE.txt).")
+    return code
+
+
 def main(argv=None):
     if FROZEN and sys.platform == "darwin":
         # Archive Utility quarantines every file it unzips, and Gatekeeper does not pass the helpers gcc
@@ -616,6 +662,9 @@ def main(argv=None):
     i.add_argument("rom")
     i.add_argument("--json", action="store_true")
     i.set_defaults(func=cmd_inspect)
+    c = sub.add_parser("convert", help="GAME.gba next to each ROM (.gb, .gbc or .zip), GAME.cdl used if present")
+    c.add_argument("roms", nargs="+")
+    c.set_defaults(func=cmd_convert)
     v = sub.add_parser("verify", help="run a scenario on the original and the port via emucap, compare")
     v.add_argument("rom")
     v.add_argument("port")

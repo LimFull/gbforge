@@ -1,0 +1,102 @@
+gbforge - turn a Game Boy / Game Boy Color game into a Game Boy Advance game
+==========================================================================
+
+gbforge converts a .gb or .gbc ROM into a .gba file that runs natively on a
+Game Boy Advance (or in a GBA emulator such as mGBA). Nothing else needs to be
+installed: everything it needs is in this folder.
+
+Use ROMs you dumped from your own cartridges.
+
+
+1. Convert a game
+-----------------
+
+Windows
+  Drag the ROM (.gb, .gbc, or a .zip containing one) onto "Convert ROM.bat".
+  A window shows the progress; press a key to close it when it is done.
+  You can also double-click "Convert ROM.bat" and drag the ROM into its window.
+
+  The first time, Windows may warn about an unknown publisher, because gbforge
+  is not code-signed: on "Windows protected your PC" click "More info", then
+  "Run anyway"; on "Open File - Security Warning" click "Run".
+
+macOS (Apple Silicon: M1 or later)
+  Drag the ROM onto "Convert ROM", or double-click "Convert ROM" and choose it.
+  When it finishes, a window tells you where the new file is.
+
+  The first time, macOS asks whether to open an app downloaded from the
+  internet: click "Open" (gbforge is signed and notarized by Apple). It may
+  also ask to let "Convert ROM" access the folder the ROM is in: click "Allow".
+
+Linux
+  Open a terminal in this folder and run:
+      ./gbforge convert /path/to/game.gbc
+
+The new file is written next to the ROM with the same name: game.gbc becomes
+game.gba. A small game takes a few seconds; a large one about a minute.
+
+
+2. Play it
+----------
+
+- Emulator: open the .gba in mGBA (https://mgba.io) or any GBA emulator.
+- Real hardware: copy the .gba to a flash cart (EZ-Flash, Everdrive GBA...).
+
+Saves go to the cartridge's save memory (SRAM, 32 KB), like any GBA game.
+
+
+3. If the game stops on a "gbforge trap" screen
+-----------------------------------------------
+
+gbforge translates the game's code before it runs, and it can only translate
+code it finds. When the result says "Note: N code paths were not found", the
+game runs until it reaches one of those paths, then stops on a screen titled
+"gbforge trap".
+
+The fix is a coverage file (game.cdl), recorded by playing the original game
+in an emulator with gbforge's developer tools. Some fan projects that build on
+gbforge (translations, for example) ship one for their game:
+
+- Put it next to the ROM with the same name: game.gbc + game.cdl (and
+  game.cdl.ram if it came with one).
+- Convert again. The result says "Used game.cdl".
+
+
+4. Applying a patch to the converted game
+-----------------------------------------
+
+A patch (e.g. a translation in .xdelta or .bps format) made for a converted
+game only applies to exactly the same file. Every conversion prints a SHA-256
+line, the file's fingerprint: check that it matches the one the patch
+project gives before you apply the patch. The same gbforge version, ROM and
+coverage file give the same fingerprint on Windows, macOS and Linux.
+
+
+5. Messages you may see
+-----------------------
+
+"Failed (code 4): ... cartridge"
+  The game uses cartridge hardware gbforge does not support yet. Supported:
+  ROM only, MBC1, MBC2, MBC3 (with its clock) and MBC5.
+
+"Failed (code 2): ..."
+  The file is not a Game Boy ROM, or it is damaged.
+
+"Failed: no .gb or .gbc file inside the zip"
+  The .zip has no ROM in it.
+
+
+6. For advanced users
+---------------------
+
+The same tool works from a terminal. On macOS and Linux use ./gbforge; on
+Windows use gbforge.exe:
+
+    gbforge convert game.gbc               what the launchers run
+    gbforge inspect game.gbc               cartridge type, colour support, sizes
+    gbforge port game.gbc --output x.gba   full options: gbforge port --help
+
+How it works, how to record coverage files, and the source code:
+https://github.com/LimFull/gbforge
+
+Third-party software included in this folder is listed in NOTICE.txt.

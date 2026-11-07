@@ -28,6 +28,6 @@
   "rom_sha1": "f6c2d60dd85da296e87d0ad1664b62821e95106a",
   "rom_sha256": "133d82836e17e149046e572c64da8054f3d53c65d9bcd11158248c92c7a7791b",
   "rom_size_bytes": 32768,
-  "tool_version": "0.1.0",
+  "tool_version": "0.2.0",
   "warnings": []
 }

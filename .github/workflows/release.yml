@@ -45,17 +45,14 @@ jobs:
             gh release upload "$TAG" dist/*.zip --clobber -R "$GITHUB_REPOSITORY"
           else
             gh release create "$TAG" dist/*.zip --draft --title "gbforge $TAG" -R "$GITHUB_REPOSITORY" --notes "$(cat <<'EOF'
-          Download the zip for your OS, unzip it, and run `gbforge` from a terminal. Nothing else to install.
+          Download the zip for your OS and unzip it. Nothing else to install. Drag a ROM (`.gb`, `.gbc` or a `.zip` holding one) onto **Convert ROM**: `game.gbc` becomes `game.gba` next to it. `GUIDE.txt` in the zip explains the rest.
 
-          ```
-          gbforge inspect game.gbc
-          gbforge port game.gbc --output game.gba
-          ```
+          From a terminal: `gbforge convert game.gbc`, or `gbforge port game.gbc --output game.gba` for all options.
 
           Commercial games need a recorded play-through for full coverage; see [Converting a game](https://github.com/LimFull/gbforge#converting-a-game).
 
-          - **macOS** (Apple Silicon): signed and notarized. After a browser download macOS asks once whether to open `gbforge`: choose **Open**. Downloading with `curl -LO` skips the prompt.
-          - **Windows** (x64): not code-signed. If SmartScreen stops it, choose **More info → Run anyway**.
+          - **macOS** (Apple Silicon): signed and notarized. The first run asks once whether to open it: choose **Open**.
+          - **Windows** (x64): not code-signed. If Windows warns about the publisher, choose **More info → Run anyway** (or **Run**).
           - **Linux** (x64, glibc 2.35+).
           EOF
           )"

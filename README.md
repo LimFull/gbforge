@@ -11,21 +11,17 @@
 
 ## Quick start
 
-**Download** the zip for your OS from [Releases](https://github.com/LimFull/gbforge/releases) (Windows x64, macOS Apple Silicon, Linux x64), unzip it and run `gbforge` in a terminal. Nothing else to install: the bundle carries its own GBA compiler.
+**Download** the zip for your OS from [Releases](https://github.com/LimFull/gbforge/releases) (Windows x64, macOS Apple Silicon, Linux x64) and unzip it. Nothing else to install: the bundle carries its own GBA compiler. Then drag a ROM (`.gb`, `.gbc` or a `.zip` holding one) onto **Convert ROM** (`Convert ROM.bat` on Windows, `Convert ROM` app on macOS): `game.gbc` becomes `game.gba` next to it. `GUIDE.txt` in the zip walks players through it, including the Windows SmartScreen and macOS "Open" prompts.
+
+From a terminal (`gbforge.exe` on Windows):
 
 ```bash
+gbforge convert game.gbc                     # what Convert ROM runs: game.gba next to the ROM, game.cdl used if present
 gbforge inspect game.gbc                     # mapper, CGB flag, sizes
-gbforge port game.gbc --output game.gba
+gbforge port game.gbc --output game.gba      # all options
 ```
 
-On Windows run `gbforge.exe`; the bundle is not code-signed, so if SmartScreen stops it choose **More info → Run anyway**. The macOS bundle is signed and notarized. Downloading it in Terminal skips the Gatekeeper prompt:
-
-```bash
-curl -LO https://github.com/LimFull/gbforge/releases/download/v0.1.0/gbforge-0.1.0-macos-arm64.zip
-unzip gbforge-0.1.0-macos-arm64.zip && cd gbforge-0.1.0-macos-arm64
-```
-
-After a browser download, macOS asks whether to open `gbforge` the first time it runs; choose **Open** (or run `xattr -dr com.apple.quarantine gbforge-0.1.0-macos-arm64` beforehand).
+The Windows bundle is not code-signed. The macOS bundle is signed and notarized; the first run asks once whether to open it.
 
 **From source** you need Python 3.12+, CMake, Ninja and a C++ compiler. `scripts/fetch_toolchain.py` downloads the pinned [Arm GNU Toolchain](https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads) (about 150 MB on macOS and Linux, 300 MB on Windows) and builds libtonc with it, both checked by SHA-256.
 

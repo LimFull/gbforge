@@ -3,7 +3,10 @@
 
 usage: scripts/package.py [--sign]
 The bundle needs no Python, CMake or GBA SDK: gbforge (PyInstaller), core/gbforge-core, runtime-gba/,
-toolchain/ (the Arm GNU Toolchain trimmed to what `port` runs, plus libtonc) and the licences.
+toolchain/ (the Arm GNU Toolchain trimmed to what `port` runs, plus libtonc), the licences, GUIDE.txt
+and a drag-and-drop launcher (packaging/). On macOS the tool sits inside Convert ROM.app, so Gatekeeper
+treats it as one app (an app run from where it was unzipped is moved to a random path, alone), and
+./gbforge links to it.
 --sign (macOS): Developer ID signature with hardened runtime on every binary, then notarization with
 the notarytool keychain profile in $NOTARY_PROFILE (see local.env.example).
 Needs PyInstaller (pip install pyinstaller), CMake and Ninja, plus a C++ compiler.
@@ -24,6 +27,7 @@ import fetch_toolchain  # noqa: E402
 import gb2gba  # noqa: E402
 
 GCC_VER = "15.2.1"
+APP = "Convert ROM.app"
 KEEP = [  # Arm GNU Toolchain files `port` runs (gcc -mthumb -mcpu=arm7tdmi selects the thumb/nofp multilib)
     "bin/arm-none-eabi-gcc{exe}", "bin/arm-none-eabi-objcopy{exe}", "bin/arm-none-eabi-nm{exe}", "bin/*.dll",
     "arm-none-eabi/bin/as{exe}", "arm-none-eabi/bin/ld{exe}", "arm-none-eabi/bin/*.dll",
@@ -33,6 +37,8 @@ KEEP = [  # Arm GNU Toolchain files `port` runs (gcc -mthumb -mcpu=arm7tdmi sele
     "arm-none-eabi/include/*.h", "arm-none-eabi/include/[!c]*/**", "license.txt",
 ]  # port links fetch_toolchain's lib/ (libgcc, libc) and tonc/
 NOTICE = """gbforge bundles third-party software; each directory keeps its own licence.
+
+Paths are relative to the tool folder (macOS: Convert ROM.app/Contents/Resources/gbforge).
 
 toolchain/arm   Arm GNU Toolchain {arm} (GCC, binutils, newlib), unmodified binaries with unused files
 toolchain/lib   removed; lib/ holds its libgcc and libc without debug info. GCC and binutils are GPL-3.0
@@ -65,8 +71,8 @@ def sign_and_notarize(stage, archive):
         raise SystemExit("--sign needs a Developer ID Application certificate and NOTARY_PROFILE")
     files = [p for p in glob.glob(os.path.join(stage, "**"), recursive=True)
              if os.path.isfile(p) and not os.path.islink(p) and macho(p)]
-    main = os.path.join(stage, "gbforge")
-    for p in sorted(files, key=lambda p: p == main):  # the launcher last
+    app = os.path.join(stage, APP)
+    for p in [*files, app]:  # the app bundle last: its seal covers the code inside
         run("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", ident, p)
     zip_dir(stage, archive)
     print("+ notarytool submit", archive, file=sys.stderr)
@@ -74,9 +80,15 @@ def sign_and_notarize(stage, archive):
                         "--output-format", "json"], capture_output=True, text=True)
     if r.returncode or json.loads(r.stdout).get("status") != "Accepted":
         raise SystemExit(f"notarization failed: {r.stdout}{r.stderr}")  # details: xcrun notarytool log ID
+    run("xcrun", "stapler", "staple", app)  # Gatekeeper then needs no network for the app
+    zip_dir(stage, archive)
 
 
 def zip_dir(stage, archive):
+    if os.path.exists(archive):
+        os.remove(archive)
+    if sys.platform == "darwin":  # keeps the ./gbforge symlink
+        return run("ditto", "-c", "-k", "--keepParent", stage, archive)
     top = os.path.dirname(stage)
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
         for p in sorted(glob.glob(os.path.join(stage, "**"), recursive=True)):
@@ -105,18 +117,27 @@ def main():
     run(sys.executable, "-m", "PyInstaller", "--noconfirm", "--onedir", "--name", "gbforge",
         "--distpath", build, "--workpath", os.path.join(build, "pyi"), "--specpath", build,
         os.path.join(ROOT, "tools", "gb2gba.py"))
-    shutil.copytree(os.path.join(build, "gbforge"), stage)
+    pkg = os.path.join(ROOT, "packaging")
+    os.makedirs(stage)
+    tool = stage
+    if osname == "macos":
+        run("osacompile", "-o", os.path.join(stage, APP), os.path.join(pkg, "convert-rom.applescript"))
+        tool = os.path.join(stage, APP, "Contents", "Resources", "gbforge")
+        os.symlink(os.path.relpath(os.path.join(tool, "gbforge"), stage), os.path.join(stage, "gbforge"))
+    elif osname == "windows":
+        shutil.copy2(os.path.join(pkg, "Convert ROM.bat"), stage)
+    shutil.copytree(os.path.join(build, "gbforge"), tool, dirs_exist_ok=True)
 
-    os.makedirs(os.path.join(stage, "core"))
-    shutil.copy2(os.path.join(core_build, "gbforge-core" + gb2gba.EXE), os.path.join(stage, "core"))
-    shutil.copytree(os.path.join(ROOT, "runtime-gba"), os.path.join(stage, "runtime-gba"))
+    os.makedirs(os.path.join(tool, "core"))
+    shutil.copy2(os.path.join(core_build, "gbforge-core" + gb2gba.EXE), os.path.join(tool, "core"))
+    shutil.copytree(os.path.join(ROOT, "runtime-gba"), os.path.join(tool, "runtime-gba"))
     src = os.path.join(ROOT, "build", "toolchain")
     for d in ("tonc", "lib"):
-        shutil.copytree(os.path.join(src, d), os.path.join(stage, "toolchain", d))
+        shutil.copytree(os.path.join(src, d), os.path.join(tool, "toolchain", d))
     for pattern in KEEP:
         for f in glob.glob(os.path.join(src, "arm", pattern.format(exe=gb2gba.EXE, gcc=GCC_VER)), recursive=True):
             if os.path.isfile(f):
-                dst = os.path.join(stage, "toolchain", "arm", os.path.relpath(f, os.path.join(src, "arm")))
+                dst = os.path.join(tool, "toolchain", "arm", os.path.relpath(f, os.path.join(src, "arm")))
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 shutil.copy2(f, dst)
 
@@ -132,13 +153,20 @@ def main():
     with open(os.path.join(stage, "NOTICE.txt"), "w") as f:
         f.write(NOTICE.format(arm=fetch_toolchain.ARM_VER, tonc=fetch_toolchain.TONC_COMMIT[:12],
                               gbr=open(os.path.join(ROOT, "CMakeLists.txt")).read().split("GBRECOMPILED_COMMIT ")[1][:12]))
-    shutil.copy2(os.path.join(ROOT, "README.md"), stage)
+    shutil.copy2(os.path.join(pkg, "GUIDE.txt"), stage)
 
-    # the bundle has to port on its own before it ships
+    # the bundle has to convert on its own, as players start it, before it ships
     smoke = os.path.join(build, "smoke")
     shutil.rmtree(smoke, ignore_errors=True)
-    run(os.path.join(stage, "gbforge" + gb2gba.EXE), "port", os.path.join(ROOT, "tests", "fixtures", "tiny", "tiny.gb"),
-        "--output", os.path.join(smoke, "tiny.gba"), cwd=build)
+    os.makedirs(smoke)
+    rom = shutil.copy2(os.path.join(ROOT, "tests", "fixtures", "tiny", "tiny.gb"), smoke)
+    if osname == "windows":
+        print("+ Convert ROM.bat", rom, file=sys.stderr)
+        subprocess.run([os.path.join(stage, "Convert ROM.bat"), rom], input="\n", text=True, check=True)
+    else:
+        run(os.path.join(stage, "gbforge"), "convert", rom, cwd=build)
+    if not os.path.exists(os.path.join(smoke, "tiny.gba")):
+        raise SystemExit("smoke test: no tiny.gba")
 
     archive = stage + ".zip"
     if a.sign:
