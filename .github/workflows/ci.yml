@@ -39,11 +39,15 @@ jobs:
       # lose characters of non-ASCII paths), byte for byte
       - name: port from a non-ASCII folder
         shell: bash
+        timeout-minutes: 10
         run: |
+          set -x
           d="$RUNNER_TEMP/한글 사용자"
-          mkdir -p "$d/gbforge" "$d/tmp"
-          cp -R tools runtime-gba build "$d/gbforge/"
-          TEMP="$d/tmp" TMP="$d/tmp" TMPDIR="$d/tmp" python "$d/gbforge/tools/gb2gba.py" port tests/fixtures/tiny/tiny.gb --output "$d/tiny.gba"
+          mkdir -p "$d/gbforge/build/core" "$d/tmp"
+          cp -R tools runtime-gba "$d/gbforge/"
+          cp build/core/gbforge-core* "$d/gbforge/build/core/"
+          cp -R build/toolchain "$d/gbforge/build/"
+          TEMP="$d/tmp" TMP="$d/tmp" TMPDIR="$d/tmp" PYTHONIOENCODING=utf-8 timeout 300 python -u "$d/gbforge/tools/gb2gba.py" port tests/fixtures/tiny/tiny.gb --output "$d/tiny.gba" < /dev/null
           cmp out/tiny.gba "$d/tiny.gba"
       - uses: actions/upload-artifact@v7
         with:
