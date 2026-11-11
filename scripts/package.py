@@ -29,10 +29,9 @@ import gb2gba  # noqa: E402
 GCC_VER = "15.2.1"
 APP = "Convert ROM.app"
 KEEP = [  # Arm GNU Toolchain files `port` runs (gcc -mthumb -mcpu=arm7tdmi selects the thumb/nofp multilib)
-    "bin/arm-none-eabi-gcc{exe}", "bin/arm-none-eabi-objcopy{exe}", "bin/arm-none-eabi-nm{exe}", "bin/*.dll",
-    "arm-none-eabi/bin/as{exe}", "arm-none-eabi/bin/ld{exe}", "arm-none-eabi/bin/*.dll",
-    "libexec/gcc/arm-none-eabi/{gcc}/cc1{exe}", "libexec/gcc/arm-none-eabi/{gcc}/collect2{exe}",
-    "libexec/gcc/arm-none-eabi/{gcc}/*.dll",
+    "bin/arm-none-eabi-gcc{exe}", "bin/arm-none-eabi-ld{exe}", "bin/arm-none-eabi-objcopy{exe}",
+    "bin/arm-none-eabi-nm{exe}", "bin/*.dll", "arm-none-eabi/bin/as{exe}", "arm-none-eabi/bin/*.dll",
+    "libexec/gcc/arm-none-eabi/{gcc}/cc1{exe}", "libexec/gcc/arm-none-eabi/{gcc}/*.dll",
     "lib/gcc/arm-none-eabi/{gcc}/include/**", "lib/gcc/arm-none-eabi/{gcc}/include-fixed/**",
     "arm-none-eabi/include/*.h", "arm-none-eabi/include/[!c]*/**", "license.txt",
 ]  # port links fetch_toolchain's lib/ (libgcc, libc) and tonc/
