@@ -35,6 +35,16 @@ jobs:
       - run: python tools/gb2gba.py analyze tests/fixtures/tiny/tiny.gb --out build/tiny
       - run: python tools/gb2gba.py port tests/fixtures/tiny/tiny.gb --output out/tiny.gba
       - run: python tools/gb2gba.py port tests/fixtures/acid2/cgb-acid2.gbc --output out/cgb-acid2.gba --allow-unresolved
+      # A Korean Windows user name puts Hangul in %TEMP% and the Desktop: the same port from such a folder (Windows binutils
+      # lose characters of non-ASCII paths), byte for byte
+      - name: port from a non-ASCII folder
+        shell: bash
+        run: |
+          d="$RUNNER_TEMP/한글 사용자"
+          mkdir -p "$d/gbforge" "$d/tmp"
+          cp -R tools runtime-gba build "$d/gbforge/"
+          TEMP="$d/tmp" TMP="$d/tmp" TMPDIR="$d/tmp" python "$d/gbforge/tools/gb2gba.py" port tests/fixtures/tiny/tiny.gb --output "$d/tiny.gba"
+          cmp out/tiny.gba "$d/tiny.gba"
       - uses: actions/upload-artifact@v7
         with:
           name: port-${{ runner.os }}
