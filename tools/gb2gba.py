@@ -208,9 +208,10 @@ def build_gba(gen, out, base, title, cflags):
         shutil.copyfile(p, os.path.join(objdir, os.path.basename(p)))
     with open(os.path.join(objdir, "objs.rsp"), "w") as f:  # Windows: the object list can exceed the command-line limit
         f.write("\n".join(os.path.basename(o) for o in objs))
-    link = [gcc, "-mthumb", "-mcpu=arm7tdmi", "-nostartfiles", "-nostdlib", "-fno-use-linker-plugin",
-            "-T", "gba.ld", "@objs.rsp", "-L", ".", "-ltonc", "-Wl,--start-group", "libgcc.a", "libc.a",
-            "-Wl,--end-group", "-Wl,--gc-sections,--no-warn-rwx-segments,-Map,port.map", "-o", "port.elf"]
+    # ld itself, not the gcc driver: collect2 rewrites @objs.rsp into %TEMP%, which it can't open under a non-ASCII
+    # name. -X is what the driver passed.
+    link = [arm_tool("ld"), "-X", "-o", "port.elf", "-T", "gba.ld", "@objs.rsp", "-L", ".", "-ltonc", "--start-group",
+            "libgcc.a", "libc.a", "--end-group", "--gc-sections", "--no-warn-rwx-segments", "-Map", "port.map"]
     if subprocess.run(link, cwd=objdir).returncode or \
             subprocess.run([arm_tool("objcopy"), "-O", "binary", "port.elf", "port.gba"], cwd=objdir).returncode:
         return False
