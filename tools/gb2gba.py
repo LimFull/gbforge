@@ -161,11 +161,12 @@ def cmd_inspect(args):
     return code
 
 
-def core(args):
-    """Run gbforge-core (C++ analyzer/codegen on gb-recompiled's gbrecomp_core)."""
+def core(args, cwd):
+    """Run gbforge-core (C++ analyzer/codegen on gb-recompiled's gbrecomp_core) in CWD. Its file arguments are names
+    relative to CWD: it opens them with narrow (ANSI) paths, which can't hold a non-ASCII folder name on Windows."""
     if not os.path.exists(CORE):
         raise SystemExit("gbforge-core not built: cmake -G Ninja -B build/core . && ninja -C build/core")
-    r = subprocess.run([CORE, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    r = subprocess.run([CORE, *args], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if r.returncode not in (0, 3):
         sys.stderr.write(r.stderr[-2000:])
     return r.returncode
@@ -297,14 +298,18 @@ def ram_overlays(rom, ram_log):
     return found, missing, sorted(entries)
 
 
-def analysis_args(args, rom):
+def analysis_args(args, rom, cwd):
+    """Core options; the ROM, trace and CDL are copied into CWD as rom.gb, trace.txt and rom.cdl (see core)."""
+    shutil.copyfile(args.rom, os.path.join(cwd, "rom.gb"))
     out = ["--no-scan"] if args.no_scan else []
     for e in (args.entry or []) + far_call_entries(rom):
         out += ["--entry", e]
     if args.trace:
-        out += ["--trace", args.trace]
+        shutil.copyfile(args.trace, os.path.join(cwd, "trace.txt"))
+        out += ["--trace", "trace.txt"]
     if args.cdl:
-        out += ["--cdl", args.cdl]
+        shutil.copyfile(args.cdl, os.path.join(cwd, "rom.cdl"))
+        out += ["--cdl", "rom.cdl"]
         if os.path.exists(args.cdl + ".ram"):
             found, _, entries = ram_overlays(rom, args.cdl + ".ram")
             for ram, at, size in found:
@@ -329,8 +334,12 @@ def cmd_analyze(args):
     rom, report = inspect_or_exit(args.rom)
     os.makedirs(args.out, exist_ok=True)
     out = os.path.join(args.out, "analysis.json")
-    if core(["analyze", args.rom, out, *analysis_args(args, rom)]) != 0:
+    stage = os.path.join(WORK, "analyze")
+    os.makedirs(stage, exist_ok=True)
+    code = core(["analyze", "rom.gb", "analysis.json", *analysis_args(args, rom, stage)], stage)
+    if code != 0:
         return 2
+    shutil.move(os.path.join(stage, "analysis.json"), out)
     with open(out) as f:
         summary = json.load(f)["summary"]
     report.update({"analysis": summary, "unresolved_edges": summary["unresolved_edges"]})
@@ -415,7 +424,7 @@ def cmd_port(args):
         f.write('#include "gb.h"\nconst GbOverlay gb_overlays[] = {\n'
                 + "".join(f"    {{0x{r:04X}, 0x{a:06X}, {n}}},\n" for r, a, n in found)
                 + f"    {{0, 0, 0}}}};\nconst unsigned gb_overlay_count = {len(found)};\n")
-    if core(["codegen", args.rom, gen, *analysis_args(args, rom)]) != 0:
+    if core(["codegen", "rom.gb", ".", *analysis_args(args, rom, gen)], gen) != 0:
         return finish(3, errors=["codegen failed (see stderr)"])
     with open(os.path.join(gen, "codegen.json")) as f:
         cg = json.load(f)
@@ -432,7 +441,6 @@ def cmd_port(args):
         report.setdefault("warnings", []).append("strict gate bypassed (--allow-unresolved): not a native result")
         print(f"warning: {report['unresolved_edges']} unresolved edges, gate bypassed", file=sys.stderr)
 
-    shutil.copyfile(args.rom, os.path.join(gen, "rom.gb"))
     report["colour"] = args.colour
     table = colour_table() if args.colour == "gbc" else range(0x8000)
     with open(os.path.join(gen, "colour.bin"), "wb") as f:
