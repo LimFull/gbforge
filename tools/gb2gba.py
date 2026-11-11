@@ -33,7 +33,7 @@ WORK = os.path.join(tempfile.gettempdir(), "gbforge") if FROZEN else os.path.joi
 SELF = [sys.executable] if FROZEN else [sys.executable, os.path.abspath(__file__)]
 GBA_ROM_LIMIT = 32 << 20
 
-TOOL_VERSION = "0.2.0"
+TOOL_VERSION = "0.2.1"
 
 # Pan Docs "The Cartridge Header" — 0147 cartridge type
 CART_TYPES = {
@@ -181,38 +181,49 @@ def arm_tool(name):
 
 def build_gba(gen, out, base, title, cflags):
     """Compile runtime + generated code and link OUT.gba, with BASE.elf/.map/.sym. True on success."""
-    rt, tonc = os.path.join(ROOT, "runtime-gba"), os.path.join(TOOLCHAIN, "tonc")
-    gcc, objdir = arm_tool("gcc"), os.path.join(os.path.dirname(gen), "obj")
-    shutil.rmtree(objdir, ignore_errors=True)
+    # The toolchain sees relative ASCII names only: on Windows binutils lose the characters of a non-ASCII path (a
+    # Korean user name: ld looked for C:/Users//AppData/..., "No space left on device"). The runtime, tonc's headers,
+    # the linker script and the libraries are copied next to gen/, gcc runs with -pipe (no files in %TEMP%), and the
+    # results are copied out. The same bytes on every host: fetch_toolchain's debug-free libgcc/libc, no LTO plugin.
+    tonc, lib, work = os.path.join(TOOLCHAIN, "tonc"), os.path.join(TOOLCHAIN, "lib"), os.path.dirname(gen)
+    gcc, objdir, rt = arm_tool("gcc"), os.path.join(work, "obj"), os.path.join(work, "rt")
+    for d in (objdir, rt):
+        shutil.rmtree(d, ignore_errors=True)
     os.makedirs(objdir)
-    cc = [gcc, "-mthumb", "-mcpu=arm7tdmi", "-O2", "-g", "-Wall", "-Wno-unused-label", "-ffunction-sections",
-          "-I", rt, "-I", os.path.join(tonc, "include"), *cflags, "-c"]
-    srcs = [os.path.join(rt, "gb.c"), os.path.join(rt, "crt0.s"), *sorted(glob.glob(os.path.join(gen, "*.c"))),
-            os.path.join(gen, "rom.s")]
-    objs = [os.path.join(objdir, os.path.basename(s) + ".o") for s in srcs]
+    shutil.copytree(os.path.join(ROOT, "runtime-gba"), rt)
+    shutil.copytree(os.path.join(tonc, "include"), os.path.join(rt, "tonc"))
+    cc = [gcc, "-pipe", "-mthumb", "-mcpu=arm7tdmi", "-O2", "-g", "-Wall", "-Wno-unused-label", "-ffunction-sections",
+          "-I", "../rt", "-I", "../rt/tonc", *cflags, "-c"]
+    srcs = ["../rt/gb.c", "../rt/crt0.s", *sorted(os.path.basename(c) for c in glob.glob(os.path.join(gen, "*.c"))),
+            "rom.s"]
+    objs = [os.path.basename(s) + ".o" for s in srcs]
     # cwd=gen: rom.s .incbin's its neighbours by relative name
     with ThreadPoolExecutor(os.cpu_count()) as ex:
-        if any(r.returncode for r in ex.map(lambda so: subprocess.run([*cc, so[0], "-o", so[1]], cwd=gen), zip(srcs, objs))):
+        if any(r.returncode for r in ex.map(lambda so: subprocess.run([*cc, so[0], "-o", "../obj/" + so[1]], cwd=gen),
+                                            zip(srcs, objs))):
             return False
-    elf = base + ".elf"
-    rsp = os.path.join(objdir, "objs.rsp")  # Windows: the object list can exceed the command-line limit
-    with open(rsp, "w") as f:
-        f.write("\n".join('"' + o.replace("\\", "/") + '"' for o in objs))
-    # The same bytes on every host: fetch_toolchain's debug-free libgcc/libc, no LTO plugin (see gba_libs)
-    lib = os.path.join(TOOLCHAIN, "lib")
+    for p in (os.path.join(rt, "gba.ld"), os.path.join(tonc, "libtonc.a"), os.path.join(lib, "libgcc.a"),
+              os.path.join(lib, "libc.a")):
+        shutil.copyfile(p, os.path.join(objdir, os.path.basename(p)))
+    with open(os.path.join(objdir, "objs.rsp"), "w") as f:  # Windows: the object list can exceed the command-line limit
+        f.write("\n".join(os.path.basename(o) for o in objs))
     link = [gcc, "-mthumb", "-mcpu=arm7tdmi", "-nostartfiles", "-nostdlib", "-fno-use-linker-plugin",
-            "-T", os.path.join(rt, "gba.ld"), "@" + rsp, "-L", tonc, "-ltonc", "-Wl,--start-group",
-            os.path.join(lib, "libgcc.a"), os.path.join(lib, "libc.a"), "-Wl,--end-group",
-            "-Wl,--gc-sections,--no-warn-rwx-segments,-Map," + base + ".map", "-o", elf]
-    if subprocess.run(link).returncode or subprocess.run([arm_tool("objcopy"), "-O", "binary", elf, out]).returncode:
+            "-T", "gba.ld", "@objs.rsp", "-L", ".", "-ltonc", "-Wl,--start-group", "libgcc.a", "libc.a",
+            "-Wl,--end-group", "-Wl,--gc-sections,--no-warn-rwx-segments,-Map,port.map", "-o", "port.elf"]
+    if subprocess.run(link, cwd=objdir).returncode or \
+            subprocess.run([arm_tool("objcopy"), "-O", "binary", "port.elf", "port.gba"], cwd=objdir).returncode:
         return False
-    with open(out, "r+b") as f:  # header: title, then the complement check over 0xA0-0xBC
+    with open(os.path.join(objdir, "port.gba"), "r+b") as f:  # header: title, then the complement check over 0xA0-0xBC
         f.seek(0xA0)
         f.write(title.encode().ljust(12, b"\0"))
         f.seek(0xA0)
         f.write(bytes([(-sum(f.read(0x1D)) - 0x19) & 0xFF]))
-    with open(base + ".sym", "w") as f:
-        return subprocess.run([arm_tool("nm"), elf], stdout=f).returncode == 0
+    with open(os.path.join(objdir, "port.sym"), "w") as f:
+        if subprocess.run([arm_tool("nm"), "port.elf"], stdout=f, cwd=objdir).returncode:
+            return False
+    for ext, dst in ((".gba", out), (".elf", base + ".elf"), (".map", base + ".map"), (".sym", base + ".sym")):
+        shutil.copyfile(os.path.join(objdir, "port" + ext), dst)
+    return True
 
 
 def runtime_gaps(header):
