@@ -156,8 +156,8 @@ static inline __attribute__((always_inline)) void unpack_f(uint8_t f) { gb.zf = 
 
 // ---- ALU (Pan Docs flag semantics) --------------------------------------------------
 //
-// `m` is a compile-time mask of the flags whose values are read later (codegen liveness,
-// per block, all flags assumed live at block ends and control flow). Dead flags are not stored.
+// `m` is a compile-time mask of the flags whose values are read later (codegen liveness over
+// the whole C function; calls, returns and jumps out read all of them). Dead flags are not stored.
 
 #define INL static inline __attribute__((always_inline))
 #define FZ 1

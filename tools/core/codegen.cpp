@@ -266,10 +266,17 @@ struct Gen {
         }
     }
 
+    // Flags the instruction itself reads (leaving the function reads all of them: see succ in emit_function).
+    // Interrupts need none: a handler that saves AF restores it, and a flag that is dead here is
+    // overwritten before anything reads it whatever a handler leaves.
     static unsigned flag_reads(const Instruction& in)
     {
         using T = InstructionType;
-        if (observes_time(in) || ends_flow(in)) return FALL;
+        if (in.is_conditional) switch (in.condition) {  // condition is NZ (0) on the others
+        case Condition::NZ: case Condition::Z: return FZ;
+        case Condition::NC: case Condition::C: return FC;
+        default: break;
+        }
         switch (in.type) {
         case T::ADC_A_R: case T::ADC_A_N: case T::ADC_A_HL: case T::SBC_A_R: case T::SBC_A_N: case T::SBC_A_HL:
         case T::RLA: case T::RRA: case T::RL_R: case T::RL_HL: case T::RR_R: case T::RR_HL: case T::CCF:
@@ -433,6 +440,44 @@ struct Gen {
                 if (in.type == InstructionType::JP_NN || in.type == InstructionType::JP_CC_NN)
                     enter.insert(key(in.bank, in.imm16));
             }
+        // Flag liveness over the whole function: backwards dataflow from "nothing live" to a fixpoint.
+        // Leaving the function (RET, a call, RST, JP HL, a jump to another function) reads every flag.
+        const auto& mine = fn_insns[fk];
+        std::map<uint32_t, unsigned> before, after;  // instruction key → flags live before / after it
+        auto live_at = [&](uint32_t k) { return mine.count(k) ? before[k] : unsigned(FALL); };
+        auto succ = [&](const Instruction& in, unsigned seq) {
+            using T = InstructionType;
+            uint16_t next = in.address + in.length;
+            unsigned l = ends_flow(in) ? 0 : seq;
+            if (in.type == T::JR_N || in.type == T::JR_CC_N) {
+                l |= live_at(key(in.bank, uint16_t(next + in.offset)));
+            } else if (in.type == T::JP_NN || in.type == T::JP_CC_NN) {
+                BankId tb = target_bank(in, in.imm16);
+                uint32_t t = key(tb, in.imm16);
+                bool here = tb != UNKNOWN_BANK && mine.count(t);
+                if (here) l |= before[t];
+                if (!here || (in.bank == 0 && in.imm16 >= 0x4000)) l |= FALL;  // guarded: may dispatch out
+            } else if (in.is_call || in.is_return || in.type == T::JP_HL || in.type == T::RST) {
+                l |= FALL;
+            }
+            return l;
+        };
+        for (bool changed = true; changed;) {
+            changed = false;
+            for (auto it = blocks.rbegin(); it != blocks.rend(); ++it) {
+                const auto& ii = r.blocks.at(*it).instruction_indices;
+                const Instruction& last = r.instructions[ii.back()];
+                unsigned seq = live_at(key(last.bank, uint16_t(last.address + last.length)));
+                for (size_t i = ii.size(); i-- > 0;) {
+                    const Instruction& in = r.instructions[ii[i]];
+                    uint32_t k = key(in.bank, in.address);
+                    unsigned a = succ(in, seq), b = (a & ~flag_writes(in)) | flag_reads(in);
+                    after[k] = a;
+                    if (before[k] != b) before[k] = b, changed = true;
+                    seq = b;
+                }
+            }
+        }
         unsigned pending = 0;
         auto flush = [&](unsigned extra) {
             unsigned n = pending + extra;
@@ -444,21 +489,12 @@ struct Gen {
         for (auto it = blocks.begin(); it != blocks.end(); ++it) {
             const BasicBlock& b = r.blocks.at(*it);
             const Instruction* last = nullptr;
-            // flag liveness, backwards over the block; everything is live at its end
-            std::vector<unsigned> live_after(b.instruction_indices.size());
-            unsigned live = FALL;
-            for (size_t i = b.instruction_indices.size(); i-- > 0;) {
-                const Instruction& in = r.instructions[b.instruction_indices[i]];
-                live_after[i] = live;
-                live = (live & ~flag_writes(in)) | flag_reads(in);
-            }
-            size_t pos = 0;
             for (size_t idx : b.instruction_indices) {
                 const Instruction& in = r.instructions[idx];
                 uint32_t k = key(in.bank, in.address);
                 stats["instructions"]++;
                 if (enter.count(k) && pending) lines.emplace_back(NO_KEY, "    " + flush(0));
-                unsigned fm = flag_writes(in) & live_after[pos++];
+                unsigned fm = flag_writes(in) & after[k];
                 if (fm != flag_writes(in)) stats["dead_flag_writes_elided"]++;
                 std::string code = emit(in, fm);
                 if (observes_time(in)) code = flush(in.cycles) + code;
