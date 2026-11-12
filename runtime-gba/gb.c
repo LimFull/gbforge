@@ -73,7 +73,10 @@ extern const u16 gb_colour[0x8000];   // CGB rgb555 -> GBA palette value (gb2gba
 
 static u16 dmg_shade(int s) { static const u16 c[4] = {0x7FFF, 0x5294, 0x294A, 0x0000}; return c[s & 3]; }
 
-static void ppu_tile_row(unsigned bank, unsigned off)   // off: 0..0x17FF tile data
+// Called from gb_write_slow for every VRAM/OAM write: ARM in IWRAM like it (no veneer to ROM Thumb).
+#define PPU_HOT __attribute__((section(".iwram.text"), target("arm")))
+
+PPU_HOT static void ppu_tile_row(unsigned bank, unsigned off)   // off: 0..0x17FF tile data
 {
     unsigned row = off & ~1u;
     const uint8_t *v = vram + bank * 0x2000;
@@ -82,7 +85,7 @@ static void ppu_tile_row(unsigned bank, unsigned off)   // off: 0..0x17FF tile d
     if (off < 0x1000) OBJ_TILES[(bank * 0x1000 + row) >> 1] = px;
 }
 
-static void ppu_map_write(unsigned off)   // off: 0..0x7FF within 9800-9FFF
+PPU_HOT static void ppu_map_write(unsigned off)   // off: 0..0x7FF within 9800-9FFF
 {
     uint8_t idx = vram[0x1800 + off], attr = cgb_mode ? vram[0x3800 + off] : 0;
     unsigned e = ((attr & 0x08) ? 512 : 0) | ((attr & 0x20) ? SE_HFLIP : 0) | ((attr & 0x40) ? SE_VFLIP : 0)
@@ -109,7 +112,7 @@ static void ppu_palettes(void)
 static uint8_t obj_lcdc[144] EWRAM_BSS;   // LCDC per line of the last frame (raster), once one is done
 static uint8_t obj_lines;
 
-static void ppu_obj(unsigned i)
+PPU_HOT static void ppu_obj(unsigned i)
 {
     const uint8_t *o = &oam[i * 4];
     OBJ_ATTR *d = &obj_shadow[i];
@@ -367,6 +370,12 @@ static void obj_limit(void)               // the GB draws the first 10 sprites (
     obj_dropped = seen & ~drawn;
 }
 
+#ifdef GB_RASTER_CHECK
+volatile uint32_t gb_rcheck[2];           // with GB_RASTER_CHECK defined: fast-path tables compared with the full build; differences
+static RasterTable rchk_tab EWRAM_BSS;
+static OBJ_ATTR rchk_obj[40];
+static int rchk_obj_before;
+#endif
 static void raster_frame(void)            // the GB frame's lines are complete: build its GBA table
 {
     while (rnext < 144) rline[rnext++] = rcur;
@@ -374,11 +383,36 @@ static void raster_frame(void)            // the GB frame's lines are complete: 
     obj_limit();
     static LineRegs shown;                // line 0 of the last table built from an unsplit frame
     if (!rsplit && !rlast_split && !memcmp(&rline[0], &shown, sizeof shown)) return;  // nothing changed
+    // Unsplit frame (every line = line 0) into a table last built unsplit with the same LCDC/WY/WX:
+    // only the BG0/BG2 scroll words differ (everything else depends on LCDC/WY/WX alone), and obj_lcdc
+    // already holds this LCDC on every line, so the sprites stay as they are.
+    static LineRegs tkey[2];              // LCDC/WY/WX of each table when it was built unsplit
+    static uint8_t tkeyed[2];
+    static int obj_key = -1;              // LCDC on every line of obj_lcdc, -1 if the lines differ
+    unsigned ti = rshow ^ 1, uniform = !rsplit;
+    const LineRegs *r0 = &rline[0];
     rlast_split = rsplit;
     rsplit = 0;
-    shown = rline[0];
+    shown = *r0;
     rready = 0;
-    RasterTable *t = &rtab[rshow ^ 1];
+    RasterTable *t = &rtab[ti];
+    if (uniform && tkeyed[ti] && tkey[ti].lcdc == r0->lcdc && tkey[ti].wy == r0->wy && tkey[ti].wx == r0->wx
+        && obj_key == r0->lcdc) {
+        u32 hv = (u16)(r0->scx - 40) | (u32)(u16)(r0->scy - 8) << 16;
+        for (unsigned y = 0; y < 161; y++) {
+            u32 *w = (u32 *)t->scroll[y].hv;
+            w[0] = w[2] = hv;
+        }
+#ifndef GB_RASTER_CHECK
+        rready = 1;
+        return;
+#else
+        rchk_tab = *t; rchk_obj_before = 1; memcpy(rchk_obj, obj_shadow, sizeof rchk_obj);
+#endif
+    }
+    tkey[ti] = *r0;
+    tkeyed[ti] = uniform;
+    obj_key = uniform ? r0->lcdc : -1;
     unsigned wl = 0, trig = 0;
     for (unsigned l = 0; l < 144; l++) {
         const LineRegs *r = &rline[l];
@@ -408,6 +442,13 @@ static void raster_frame(void)            // the GB frame's lines are complete: 
         t->scroll[y] = t->scroll[from]; t->dispcnt[y] = t->dispcnt[from];
         t->bgcnt[y][0] = t->bgcnt[from][0]; t->bgcnt[y][1] = t->bgcnt[from][1]; t->win0h[y] = t->win0h[from];
     }
+#ifdef GB_RASTER_CHECK
+    if (rchk_obj_before) {
+        gb_rcheck[0]++;
+        if (memcmp(&rchk_tab, t, sizeof *t) || memcmp(rchk_obj, obj_shadow, sizeof rchk_obj)) gb_rcheck[1]++;
+        rchk_obj_before = 0;
+    }
+#endif
     rready = 1;
 }
 
