@@ -33,7 +33,7 @@ WORK = os.path.join(tempfile.gettempdir(), "gbforge") if FROZEN else os.path.joi
 SELF = [sys.executable] if FROZEN else [sys.executable, os.path.abspath(__file__)]
 GBA_ROM_LIMIT = 32 << 20
 
-TOOL_VERSION = "0.2.1"
+TOOL_VERSION = "0.3.0"
 
 # Pan Docs "The Cartridge Header" — 0147 cartridge type
 CART_TYPES = {
